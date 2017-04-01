@@ -22,7 +22,11 @@ OBJCOPYFLAGS    := -O binary
 LDFLAGS_vmlinux :=
 
 ifeq ($(ARCH),riscv)
-	KBUILD_DEFCONFIG = riscv64_spike
+	ifeq ($(CONFIG_RV_LOWRISC),y)
+		KBUILD_DEFCONFIG = riscv64_lowrisc
+	else
+		KBUILD_DEFCONFIG = riscv64_spike
+	endif
 else
 	KBUILD_DEFCONFIG = $(ARCH)_spike
 endif

@@ -26,6 +26,224 @@ static irqreturn_t sbi_console_isr(int irq, void *dev_id)
 	return IRQ_HANDLED;
 }
 
+enum edcl_mode {edcl_mode_unknown, edcl_mode_read, edcl_mode_write, edcl_mode_block_read, edcl_max=256};
+
+#pragma pack(4)
+
+static struct etrans {
+  enum edcl_mode mode;
+  volatile uint32_t *ptr;
+  uint32_t val;
+} edcl_trans[edcl_max+1];
+
+#pragma pack()
+
+static int edcl_cnt;
+
+/* shared address space pointer (appears at 0x800000 in minion address map */
+volatile static struct etrans *shared_base;
+volatile uint32_t * const rxfifo_base = (volatile uint32_t*)(4<<20);
+
+int shared_read(volatile struct etrans *addr, int cnt, struct etrans *obuf)
+  {
+    int i;
+    for (i = 0; i < cnt; i++)
+      {
+	obuf[i] = addr[i];
+#ifdef SDHCI_VERBOSE4
+	printk("shared_read(%d, %p) => %p,%x;\n", i, addr+i, obuf[i].ptr, obuf[i].val);
+#endif
+      }
+    return 0;
+  }
+
+int shared_write(volatile struct etrans *addr, int cnt, struct etrans *ibuf)
+  {
+    int i;
+    for (i = 0; i < cnt; i++)
+      {
+	addr[i] = ibuf[i];
+#ifdef SDHCI_VERBOSE4
+	{
+	  int j;
+	  printk("shared_write(%d, %p, 0x%x, 0x%p);\n", i, addr+i, cnt, ibuf);
+	  for (j = 0; j < sizeof(struct etrans); j++)
+	    printk("%x ", ((volatile uint8_t *)(&addr[i]))[j]);
+	  printk("\n");
+	}
+#endif	
+      }
+    return 0;
+  }
+
+int queue_flush(void)
+{
+  int cnt;
+  struct etrans tmp;
+  tmp.val = 0xDEADBEEF;
+  edcl_trans[edcl_cnt++].mode = edcl_mode_unknown;
+#ifdef VERBOSE
+  printk("sizeof(struct etrans) = %d\n", sizeof(struct etrans));
+  for (int i = 0; i < edcl_cnt; i++)
+    {
+      switch(edcl_trans[i].mode)
+	{
+	case edcl_mode_write:
+	  printk("queue_mode_write(%p, 0x%x);\n", edcl_trans[i].ptr, edcl_trans[i].val);
+	  break;
+	case edcl_mode_read:
+	  printk("queue_mode_read(%p, 0x%x);\n", edcl_trans[i].ptr, edcl_trans[i].val);
+	  break;
+	case edcl_mode_unknown:
+	  if (i == edcl_cnt-1)
+	    {
+	    printk("queue_end();\n");
+	    break;
+	    }
+	default:
+	  printk("queue_mode %d\n", edcl_trans[i].mode);
+	  break;
+	}
+    }
+#endif
+  shared_write(shared_base, edcl_cnt, edcl_trans);
+  shared_write(shared_base+edcl_max, 1, &tmp);
+  do {
+#ifdef VERBOSE
+    int i = 10000000;
+    int tot = 0;
+    while (i--) tot += i;
+    printk("waiting for minion %x\n", tot);
+#endif
+    shared_read(shared_base, 1, &tmp);
+  } while (tmp.ptr);
+  tmp.val = 0;
+  shared_write(shared_base+edcl_max, 1, &tmp);
+  cnt = edcl_cnt;
+  edcl_cnt = 1;
+  edcl_trans[0].mode = edcl_mode_read;
+  edcl_trans[0].ptr = (volatile uint32_t*)(8<<20);
+  return cnt;
+}
+
+void queue_write(volatile uint32_t *const sd_ptr, uint32_t val, int flush)
+ {
+   struct etrans tmp;
+#if 1
+   flush = 1;
+#endif   
+   tmp.mode = edcl_mode_write;
+   tmp.ptr = sd_ptr;
+   tmp.val = val;
+   edcl_trans[edcl_cnt++] = tmp;
+   if (flush || (edcl_cnt==edcl_max-1))
+     {
+       queue_flush();
+     }
+#ifdef VERBOSE  
+   printk("queue_write(%p, 0x%x);\n", tmp.ptr, tmp.val);
+#endif
+ }
+
+uint32_t queue_read(volatile uint32_t * const sd_ptr)
+ {
+   int cnt;
+   struct etrans tmp;
+   tmp.mode = edcl_mode_read;
+   tmp.ptr = sd_ptr;
+   tmp.val = 0xDEADBEEF;
+   edcl_trans[edcl_cnt++] = tmp;
+   cnt = queue_flush();
+   shared_read(shared_base+(cnt-2), 1, &tmp);
+#ifdef VERBOSE
+   printk("queue_read(%p, %p, 0x%x);\n", sd_ptr, tmp.ptr, tmp.val);
+#endif   
+   return tmp.val;
+ }
+
+void queue_read_array(volatile uint32_t * const sd_ptr, uint32_t cnt, uint32_t iobuf[])
+ {
+   int i, n, cnt2;
+   struct etrans tmp;
+   if (edcl_cnt+cnt >= edcl_max)
+     {
+     queue_flush();
+     }
+   for (i = 0; i < cnt; i++)
+     {
+       tmp.mode = edcl_mode_read;
+       tmp.ptr = sd_ptr+i;
+       tmp.val = 0xDEADBEEF;
+       edcl_trans[edcl_cnt++] = tmp;
+     }
+   cnt2 = queue_flush();
+   n = cnt2-1-cnt;
+   shared_read(shared_base+n, cnt, edcl_trans+n);
+   for (i = n; i < n+cnt; i++) iobuf[i-n] = edcl_trans[i].val;
+ }
+
+uint32_t queue_block_read2(int i)
+{
+  uint32_t rslt = __be32_to_cpu(((volatile uint32_t *)(shared_base+1))[i]);
+  return rslt;
+}
+
+int queue_block_read1(void)
+{
+   struct etrans tmp;
+   queue_flush();
+   tmp.mode = edcl_mode_block_read;
+   tmp.ptr = rxfifo_base;
+   tmp.val = 1;
+   shared_write(shared_base, 1, &tmp);
+   tmp.val = 0xDEADBEEF;
+   shared_write(shared_base+edcl_max, 1, &tmp);
+   do {
+    shared_read(shared_base, 1, &tmp);
+  } while (tmp.ptr);
+#ifdef SDHCI_VERBOSE3
+   printk("queue_block_read1 completed\n");
+#endif
+   return tmp.mode;
+}
+
+void rx_write_fifo(uint32_t data)
+{
+  queue_write(rxfifo_base, data, 0);
+}
+
+uint32_t rx_read_fifo(void)
+{
+  return queue_read(rxfifo_base);
+}
+
+void write_led(uint32_t data)
+{
+  volatile uint32_t * const led_base = (volatile uint32_t*)(7<<20);
+  queue_write(led_base, data, 1);
+}
+ 
+static void minion_console_putchar(unsigned char ch)
+{
+  static int addr_int = 0;
+  volatile uint32_t * const video_base = (volatile uint32_t*)(10<<20);
+  if (ch != 10) queue_write(video_base+addr_int, ch, 0);
+  else
+    {
+      while ((addr_int & 127) < 127)
+         {
+	   queue_write(video_base+addr_int, ' ', 1);
+	   addr_int++;
+         }
+    }
+  if (++addr_int >= 4096)
+    {
+      // this is where we would scroll
+      addr_int = 0;
+    }
+  sbi_console_putchar(ch);
+}
+
 static int sbi_tty_open(struct tty_struct *tty, struct file *filp)
 {
 	return 0;
@@ -86,6 +304,7 @@ static struct console sbi_console = {
 static int __init sbi_console_init(void)
 {
 	int ret;
+	shared_base = (volatile struct etrans *)ioremap(0x40010000, 0x2000);
 
 	register_console(&sbi_console);
 
