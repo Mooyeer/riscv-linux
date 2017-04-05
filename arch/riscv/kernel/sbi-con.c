@@ -7,8 +7,14 @@
 #include <linux/interrupt.h>
 
 #include <asm/sbi.h>
-
+#include <linux/module.h>
+#include <linux/timer.h>
+#include <linux/spinlock.h>
+ 
+/* A timer list */
+struct timer_list keyb_timer;
 static DEFINE_SPINLOCK(sbi_tty_port_lock);
+static DEFINE_SPINLOCK(sbi_timer_lock);
 static struct tty_port sbi_tty_port;
 static struct tty_driver *sbi_tty_driver;
 
@@ -223,6 +229,40 @@ void write_led(uint32_t data)
   queue_write(led_base, data, 1);
 }
  
+/* Timer callback */
+void timer_callback(unsigned long arg)
+{
+  uint32_t key;
+  volatile uint32_t * const keyb_base = (volatile uint32_t*)(9<<20);
+  spin_lock(&sbi_timer_lock);
+  key = queue_read(keyb_base);
+  while ((1<<28) & ~key) /* FIFO not empty */
+    {
+      int ch;
+      queue_write(keyb_base+1, 0, 0);
+      ch = queue_read(keyb_base+1) >> 8; /* strip off the scan code (default ascii code is UK) */
+      spin_lock(&sbi_tty_port_lock);
+      tty_insert_flip_char(&sbi_tty_port, ch, TTY_NORMAL);
+      tty_flip_buffer_push(&sbi_tty_port);
+      spin_unlock(&sbi_tty_port_lock);
+      key = queue_read(keyb_base);
+    }
+  spin_unlock(&sbi_timer_lock);
+  mod_timer(&keyb_timer, jiffies + 6); /* restarting timer */
+}
+ 
+/* Init the timer */
+static void keyb_init_timer(void)
+{
+    init_timer(&keyb_timer);
+    keyb_timer.function = timer_callback;
+    keyb_timer.data = 0;
+    keyb_timer.expires = jiffies + 6;
+    add_timer(&keyb_timer); /* Starting the timer */
+ 
+    printk(KERN_INFO "keyb_timer is started\n");
+}
+
 static void minion_console_putchar(unsigned char ch)
 {
   static int addr_int = 0;
@@ -255,7 +295,7 @@ static int sbi_tty_write(struct tty_struct *tty,
 	const unsigned char *end;
 
 	for (end = buf + count; buf < end; buf++) {
-		sbi_console_putchar(*buf);
+		minion_console_putchar(*buf);
 	}
 	return count;
 }
@@ -276,8 +316,8 @@ static void sbi_console_write(struct console *co, const char *buf, unsigned n)
 {
 	for ( ; n > 0; n--, buf++) {
 		if (*buf == '\n')
-			sbi_console_putchar('\r');
-		sbi_console_putchar(*buf);
+			minion_console_putchar('\r');
+		minion_console_putchar(*buf);
 	}
 }
 
@@ -337,6 +377,11 @@ static int __init sbi_console_init(void)
 	/* Poll the console once, which will trigger future interrupts */
 	sbi_console_isr(0, NULL);
 
+	/* Init the spinlock */
+	spin_lock_init(&sbi_timer_lock);
+ 
+	/* Init the timer */
+	keyb_init_timer();
 	return ret;
 
 out_tty_put:
