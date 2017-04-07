@@ -53,6 +53,7 @@ volatile uint32_t * const rxfifo_base = (volatile uint32_t*)(4<<20);
 int shared_read(volatile struct etrans *addr, int cnt, struct etrans *obuf)
   {
     int i;
+    spin_lock(&sbi_timer_lock);
     for (i = 0; i < cnt; i++)
       {
 	obuf[i] = addr[i];
@@ -60,12 +61,14 @@ int shared_read(volatile struct etrans *addr, int cnt, struct etrans *obuf)
 	printk("shared_read(%d, %p) => %p,%x;\n", i, addr+i, obuf[i].ptr, obuf[i].val);
 #endif
       }
+    spin_unlock(&sbi_timer_lock);
     return 0;
   }
 
 int shared_write(volatile struct etrans *addr, int cnt, struct etrans *ibuf)
   {
     int i;
+    spin_lock(&sbi_timer_lock);
     for (i = 0; i < cnt; i++)
       {
 	addr[i] = ibuf[i];
@@ -79,6 +82,7 @@ int shared_write(volatile struct etrans *addr, int cnt, struct etrans *ibuf)
 	}
 #endif	
       }
+    spin_unlock(&sbi_timer_lock);
     return 0;
   }
 
@@ -86,6 +90,7 @@ int queue_flush(void)
 {
   int cnt;
   struct etrans tmp;
+  spin_lock(&sbi_timer_lock);
   tmp.val = 0xDEADBEEF;
   edcl_trans[edcl_cnt++].mode = edcl_mode_unknown;
 #ifdef VERBOSE
@@ -129,12 +134,14 @@ int queue_flush(void)
   edcl_cnt = 1;
   edcl_trans[0].mode = edcl_mode_read;
   edcl_trans[0].ptr = (volatile uint32_t*)(8<<20);
+  spin_unlock(&sbi_timer_lock);
   return cnt;
 }
 
 void queue_write(volatile uint32_t *const sd_ptr, uint32_t val, int flush)
  {
    struct etrans tmp;
+   spin_lock(&sbi_timer_lock);
 #if 1
    flush = 1;
 #endif   
@@ -149,12 +156,14 @@ void queue_write(volatile uint32_t *const sd_ptr, uint32_t val, int flush)
 #ifdef VERBOSE  
    printk("queue_write(%p, 0x%x);\n", tmp.ptr, tmp.val);
 #endif
+   spin_unlock(&sbi_timer_lock);
  }
 
 uint32_t queue_read(volatile uint32_t * const sd_ptr)
  {
    int cnt;
    struct etrans tmp;
+   spin_lock(&sbi_timer_lock);
    tmp.mode = edcl_mode_read;
    tmp.ptr = sd_ptr;
    tmp.val = 0xDEADBEEF;
@@ -164,6 +173,7 @@ uint32_t queue_read(volatile uint32_t * const sd_ptr)
 #ifdef VERBOSE
    printk("queue_read(%p, %p, 0x%x);\n", sd_ptr, tmp.ptr, tmp.val);
 #endif   
+   spin_unlock(&sbi_timer_lock);
    return tmp.val;
  }
 
@@ -171,6 +181,7 @@ void queue_read_array(volatile uint32_t * const sd_ptr, uint32_t cnt, uint32_t i
  {
    int i, n, cnt2;
    struct etrans tmp;
+   spin_lock(&sbi_timer_lock);
    if (edcl_cnt+cnt >= edcl_max)
      {
      queue_flush();
@@ -186,17 +197,22 @@ void queue_read_array(volatile uint32_t * const sd_ptr, uint32_t cnt, uint32_t i
    n = cnt2-1-cnt;
    shared_read(shared_base+n, cnt, edcl_trans+n);
    for (i = n; i < n+cnt; i++) iobuf[i-n] = edcl_trans[i].val;
+   spin_unlock(&sbi_timer_lock);
  }
 
 uint32_t queue_block_read2(int i)
 {
-  uint32_t rslt = __be32_to_cpu(((volatile uint32_t *)(shared_base+1))[i]);
+  uint32_t rslt;
+  spin_lock(&sbi_timer_lock);
+  rslt = __be32_to_cpu(((volatile uint32_t *)(shared_base+1))[i]);
+  spin_unlock(&sbi_timer_lock);
   return rslt;
 }
 
 int queue_block_read1(void)
 {
    struct etrans tmp;
+   spin_lock(&sbi_timer_lock);
    queue_flush();
    tmp.mode = edcl_mode_block_read;
    tmp.ptr = rxfifo_base;
@@ -210,6 +226,7 @@ int queue_block_read1(void)
 #ifdef SDHCI_VERBOSE3
    printk("queue_block_read1 completed\n");
 #endif
+   spin_unlock(&sbi_timer_lock);
    return tmp.mode;
 }
 
@@ -234,7 +251,6 @@ void timer_callback(unsigned long arg)
 {
   uint32_t key;
   volatile uint32_t * const keyb_base = (volatile uint32_t*)(9<<20);
-  spin_lock(&sbi_timer_lock);
   key = queue_read(keyb_base);
   while ((1<<28) & ~key) /* FIFO not empty */
     {
@@ -247,7 +263,6 @@ void timer_callback(unsigned long arg)
       spin_unlock(&sbi_tty_port_lock);
       key = queue_read(keyb_base);
     }
-  spin_unlock(&sbi_timer_lock);
   mod_timer(&keyb_timer, jiffies + 6); /* restarting timer */
 }
  
