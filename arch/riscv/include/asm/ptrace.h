@@ -43,6 +43,7 @@ struct pt_regs {
 	unsigned long sstatus;
 	unsigned long sbadaddr;
 	unsigned long scause;
+  unsigned long stagctrl;
 };
 
 #ifdef CONFIG_64BIT

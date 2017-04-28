@@ -23,8 +23,14 @@ _restore_kernel_sp:
 	csrr sp, sscratch
 _save_context:
 	addi sp, sp, -(PT_SIZE)
-	REG_S x1,  PT_RA(sp)
+	/* Assume gp is untagged and use that assumption to to allow tagctrl to be
+	 * saved and reset to zero */
 	REG_S x3,  PT_GP(sp)
+	csrr x3, stagctrl
+	csrw stagctrl, zero
+	REG_S x3, PT_STAGCTRL(sp)
+
+	REG_S x1,  PT_RA(sp)
 	REG_S x4,  PT_TP(sp)
 	REG_S x5,  PT_T0(sp)
 	REG_S x6,  PT_T1(sp)
@@ -77,7 +83,6 @@ _save_context:
 	csrw sepc, a2
 
 	REG_L x1,  PT_RA(sp)
-	REG_L x3,  PT_GP(sp)
 	REG_L x4,  PT_TP(sp)
 	REG_L x5,  PT_T0(sp)
 	REG_L x6,  PT_T1(sp)
@@ -106,6 +111,11 @@ _save_context:
 	REG_L x29, PT_T4(sp)
 	REG_L x30, PT_T5(sp)
 	REG_L x31, PT_T6(sp)
+
+	/* Restore tagctrl prior to returning */
+	REG_L x3,  PT_STAGCTRL(sp)
+	csrw stagctrl, x3
+	REG_L x3,  PT_GP(sp)
 
 	REG_L x2,  PT_SP(sp)
 	.endm
