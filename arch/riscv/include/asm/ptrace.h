@@ -39,11 +39,12 @@ struct pt_regs {
 	unsigned long t4;
 	unsigned long t5;
 	unsigned long t6;
+        unsigned long utagctrl;
 	/* Supervisor CSRs */
 	unsigned long sstatus;
 	unsigned long sbadaddr;
 	unsigned long scause;
-  unsigned long stagctrl;
+        unsigned long stagctrl;
 };
 
 #ifdef CONFIG_64BIT

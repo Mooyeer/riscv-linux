@@ -6,6 +6,7 @@
 #include <asm/unistd.h>
 #include <asm/thread_info.h>
 #include <asm/asm-offsets.h>
+#include <asm/encoding.h>
 
 	.text
 	.altmacro
@@ -23,14 +24,29 @@ _restore_kernel_sp:
 	csrr sp, sscratch
 _save_context:
 	addi sp, sp, -(PT_SIZE)
-	/* Assume gp is untagged and use that assumption to to allow tagctrl to be
-	 * saved and reset to zero */
-	REG_S x3,  PT_GP(sp)
-	csrr x3, stagctrl
-	csrw stagctrl, zero
-	REG_S x3, PT_STAGCTRL(sp)
 
+        # spill a gpr
+        csrw  stagctrl_scratch, x1
+
+        # save current stagctrl
+        csrr  x1, stagctrl
+
+        # temporarily zero stagctrl to save current stagctrl to the stack
+        csrw  stagctrl, zero
+
+        # save stagctrl to stack
+        REG_S x1,  PT_STAGCTRL(sp)
+
+        # set stagctrl to save registers
+        li    x1, TMASK_STORE_PROP
+        csrw  stagctrl, x1
+
+        # restore spilled register
+        csrr  x1, stagctrl_scratch
+        
+        # save gp regs
 	REG_S x1,  PT_RA(sp)
+      	REG_S x3,  PT_GP(sp)
 	REG_S x4,  PT_TP(sp)
 	REG_S x5,  PT_T0(sp)
 	REG_S x6,  PT_T1(sp)
@@ -60,6 +76,9 @@ _save_context:
 	REG_S x30, PT_T5(sp)
 	REG_S x31, PT_T6(sp)
 
+        # save utagctrl
+        csrr t0, utagctrl
+        REG_S t0, PT_UTAGCTRL(sp)
 	/* Disable FPU to detect illegal usage of
 	   floating point in kernel space */
 	li t0, SR_FS
@@ -74,15 +93,34 @@ _save_context:
 	REG_S s2, PT_SEPC(sp)
 	REG_S s3, PT_SBADADDR(sp)
 	REG_S s4, PT_SCAUSE(sp)
-	.endm
+
+        # restore saved stagctrl here
+        REG_L s0, PT_STAGCTRL(sp)
+        csrw  stagctrl, s0
+        .endm
 
 	.macro RESTORE_ALL
+        # save current stagctrl
+        csrr  t0, stagctrl
+
+        # set stagctrl appropriately
+        li    x1, TMASK_LOAD_PROP
+        csrw  stagctrl, x1
+
+        # write stagctrl to the stack
+        REG_S t0, PT_STAGCTRL(sp)
+
+        # restore utagctrl
+        REG_L a0, PT_UTAGCTRL(sp)
+        csrw  utagctrl, a0
+        
 	REG_L a0, PT_SSTATUS(sp)
 	REG_L a2, PT_SEPC(sp)
 	csrw sstatus, a0
 	csrw sepc, a2
 
 	REG_L x1,  PT_RA(sp)
+      	REG_L x3,  PT_GP(sp)    
 	REG_L x4,  PT_TP(sp)
 	REG_L x5,  PT_T0(sp)
 	REG_L x6,  PT_T1(sp)
@@ -112,12 +150,20 @@ _save_context:
 	REG_L x30, PT_T5(sp)
 	REG_L x31, PT_T6(sp)
 
-	/* Restore tagctrl prior to returning */
-	REG_L x3,  PT_STAGCTRL(sp)
-	csrw stagctrl, x3
-	REG_L x3,  PT_GP(sp)
+        # load stagctrl back in advance, so we can restore the stack pointer
+        # spill a GPR to use
+        csrw  stagctrl_scratch, x1
+        REG_L x1,  PT_STAGCTRL(sp)
 
+        # restore stack pointer
 	REG_L x2,  PT_SP(sp)
+
+        # wait to actually restore stagctrl until here, so we still propagate
+        # tags on the load of sp
+        csrw  stagctrl, x1
+
+        # restore the GPR
+        csrr  x1, stagctrl_scratch
 	.endm
 
 ENTRY(handle_exception)
@@ -407,3 +453,4 @@ ENTRY(excp_vect_table)
 excp_vect_table_end:
 END(excp_vect_table)
 
+       
