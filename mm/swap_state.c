@@ -19,6 +19,7 @@
 #include <linux/migrate.h>
 
 #include <asm/pgtable.h>
+#include <asm/encoding.h>
 
 /*
  * swapper_space is a fiction, retained to simplify the path through
@@ -72,6 +73,21 @@ void show_swap_cache_info(void)
 	printk("Total swap = %lukB\n", total_swap_pages << (PAGE_SHIFT - 10));
 }
 
+/*** THESE ARE HELPER FUNCTIONS THAT SHOULD BE PUT SOMEWHERE ELSE AT SOME POINT ***/
+static uint8_t get_tagged_val(uint64_t *src, uint64_t *out) {
+  uint8_t tag;
+  uint64_t val;
+  asm volatile( "ld %0, 0(%2); tagr %1, %0; tagw %0, zero;" : "=r" (val), "=r" (tag) : "r" (src));
+  *out = val;
+  return tag;
+}
+
+static void set_tagged_val(uint64_t *dst, uint64_t val, uint8_t tag) {
+  asm volatile ( "tagw %0, %1; sd %0, 0(%2); tagw %0, zero;" : : "r" (val), "r" (tag), "r" (dst));
+}
+
+/********************************/
+
 /*
  * __add_to_swap_cache resembles add_to_page_cache_locked on swapper_space,
  * but sets SwapCache flag and private instead of mapping and index.
@@ -115,15 +131,59 @@ int __add_to_swap_cache(struct page *page, swp_entry_t entry)
 	return error;
 }
 
+static void harvest_tags(struct swap_info_struct *si, swp_entry_t entry, struct page *page) {
+   unsigned long save_tagctrl = read_csr(stagctrl);
+   unsigned long read_tagctrl = TMASK_STORE_PROP | TMASK_LOAD_PROP;
+   unsigned long index = (swp_offset(entry)) * PAGE_SIZE/sizeof(unsigned long);
+
+   int i;
+   /* get the physical address for the page. */
+   /* turn the physical address into a kernel virtual address */
+
+   /* map the page into kernel space */
+   unsigned long *addr = kmap(page);
+
+   uint64_t out;
+   uint8_t tag;
+
+   write_csr(stagctrl, read_tagctrl);
+
+   /* Cheating...set some tags so we can check if they store */
+   /* tag = get_tagged_val((uint64_t *)(addr), &out); */
+   /* tag = 1; */
+   /* set_tagged_val((uint64_t *)addr, out, tag); */
+   
+   /* is reading from the page gonna cause some weird race condition? */
+   for (i = 0; i < PAGE_SIZE/sizeof(unsigned long); i++) {
+      tag = get_tagged_val((uint64_t *)(addr + i), &out);
+      (si->tags)[index + i] = tag; 
+
+      /* if (tag != 0 || out == 0xdeadbeef || out == 0xfeedfeed) { */
+      /*    printk("Physical address: %llx\n", page_to_phys(page)); */
+      /*    printk("%lu %lx %x\n", index, *(addr + i), tag); */
+      /* } */
+   }
+   kunmap(page);
+   write_csr(stagctrl, save_tagctrl);
+}
 
 int add_to_swap_cache(struct page *page, swp_entry_t entry, gfp_t gfp_mask)
 {
 	int error;
+        struct swap_info_struct *si;
 
 	error = radix_tree_maybe_preload(gfp_mask);
 	if (!error) {
 		error = __add_to_swap_cache(page, entry);
 		radix_tree_preload_end();
+                if (!error) {
+                        /* We've successfully added the page to the swap cache, so save its bits*/
+                        /* get swap_info_struct with page_swap_info */
+                        /* index in using entry.val offset field */
+                   si = page_swap_info(page);
+                   harvest_tags(si, entry, page);
+                }
+
 	}
 	return error;
 }
@@ -384,6 +444,32 @@ struct page *__read_swap_cache_async(swp_entry_t entry, gfp_t gfp_mask,
 	return found_page;
 }
 
+static void restore_tags(struct swap_info_struct *si, swp_entry_t entry, struct page *page) {
+         unsigned long save_tagctrl = read_csr(stagctrl);
+         unsigned long read_tagctrl = TMASK_STORE_PROP | TMASK_LOAD_PROP;
+         unsigned long index = (swp_offset(entry)) * PAGE_SIZE/sizeof(unsigned long);
+
+         int i;
+      
+         unsigned long *addr = kmap(page);
+
+         uint64_t out;
+         uint8_t tag;
+
+         write_csr(stagctrl, read_tagctrl);
+         for (i = 0; i < PAGE_SIZE/sizeof(unsigned long); i++) {
+                  get_tagged_val((uint64_t *)(addr + i), &out);
+                  tag = (si->tags)[index + i];
+                  /* if (tag != 0 || out == 0xfeedfeed) { */
+                  /*          printk("%lu %lx %x\n", index, *(addr + i), tag); */
+                  /* } */
+                  set_tagged_val((uint64_t *)(addr +i), out, tag);
+         
+         }
+         kunmap(page);
+         write_csr(stagctrl, save_tagctrl);
+}
+
 /*
  * Locate a page of swap in physical memory, reserving swap cache space
  * and reading the disk if it is not already cached.
@@ -394,11 +480,17 @@ struct page *read_swap_cache_async(swp_entry_t entry, gfp_t gfp_mask,
 			struct vm_area_struct *vma, unsigned long addr)
 {
 	bool page_was_allocated;
+        struct swap_info_struct *si;
+
 	struct page *retpage = __read_swap_cache_async(entry, gfp_mask,
 			vma, addr, &page_was_allocated);
 
-	if (page_was_allocated)
+	if (page_was_allocated) {
+                /* a new page was allocated, so restore tags */
 		swap_readpage(retpage);
+                si = page_swap_info(retpage);
+                restore_tags(si, entry, retpage);
+        }
 
 	return retpage;
 }
