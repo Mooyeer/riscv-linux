@@ -1993,8 +1993,10 @@ static inline void cow_user_page(struct page *dst, struct page *src, unsigned lo
 			clear_page(kaddr);
 		kunmap_atomic(kaddr);
 		flush_dcache_page(dst);
-	} else
-		copy_user_highpage(dst, src, va, vma);
+	} else {
+                copy_user_highpage_and_tags(dst, src, va, vma);
+                //printk("Copied user page\n");
+        }
 }
 
 static gfp_t __get_fault_gfp_mask(struct vm_area_struct *vma)
@@ -2131,6 +2133,7 @@ static int wp_page_copy(struct mm_struct *mm, struct vm_area_struct *vma,
 	const unsigned long mmun_start = address & PAGE_MASK;	/* For mmu_notifiers */
 	const unsigned long mmun_end = mmun_start + PAGE_SIZE;	/* For mmu_notifiers */
 	struct mem_cgroup *memcg;
+        //printk("In wp_page_copy\n");
 
 	if (unlikely(anon_vma_prepare(vma)))
 		goto oom;
@@ -2140,9 +2143,12 @@ static int wp_page_copy(struct mm_struct *mm, struct vm_area_struct *vma,
 		if (!new_page)
 			goto oom;
 	} else {
-		new_page = alloc_page_vma(GFP_HIGHUSER_MOVABLE, vma, address);
+                new_page = alloc_page_vma(GFP_HIGHUSER_MOVABLE, vma, address);
 		if (!new_page)
 			goto oom;
+                if (PageAnon(old_page)) {
+                   //printk("Copying anonymous page\n");
+                }
 		cow_user_page(new_page, old_page, address, vma);
 	}
 
@@ -2661,6 +2667,7 @@ static int do_swap_page(struct mm_struct *mm, struct vm_area_struct *vma,
 	}
 
 	if (flags & FAULT_FLAG_WRITE) {
+           //printk("Calling do_wp_page from do_swap_page\n");
 		ret |= do_wp_page(mm, vma, address, page_table, pmd, ptl, pte);
 		if (ret & VM_FAULT_ERROR)
 			ret &= VM_FAULT_ERROR;
@@ -3054,6 +3061,8 @@ static int do_cow_fault(struct mm_struct *mm, struct vm_area_struct *vma,
 	pte_t *pte;
 	int ret;
 
+
+        //printk("Handling cow fault\n");
 	if (unlikely(anon_vma_prepare(vma)))
 		return VM_FAULT_OOM;
 
@@ -3071,7 +3080,7 @@ static int do_cow_fault(struct mm_struct *mm, struct vm_area_struct *vma,
 		goto uncharge_out;
 
 	if (fault_page)
-		copy_user_highpage(new_page, fault_page, address, vma);
+		copy_user_highpage_and_tags(new_page, fault_page, address, vma);
 	__SetPageUptodate(new_page);
 
 	pte = pte_offset_map_lock(mm, pmd, address, &ptl);
@@ -3361,13 +3370,16 @@ static int handle_pte_fault(struct mm_struct *mm,
 	barrier();
 	if (!pte_present(entry)) {
 		if (pte_none(entry)) {
-			if (vma_is_anonymous(vma))
+                   if (vma_is_anonymous(vma)) {
+                      //printk("Fault was for anonymous page\n");
+
 				return do_anonymous_page(mm, vma, address,
 							 pte, pmd, flags);
+                   }
 			else
 				return do_fault(mm, vma, address, pte, pmd,
 						flags, entry);
-		}
+		} 
 		return do_swap_page(mm, vma, address,
 					pte, pmd, flags, entry);
 	}
@@ -3380,9 +3392,10 @@ static int handle_pte_fault(struct mm_struct *mm,
 	if (unlikely(!pte_same(*pte, entry)))
 		goto unlock;
 	if (flags & FAULT_FLAG_WRITE) {
-		if (!pte_write(entry))
+           if (!pte_write(entry)) {
 			return do_wp_page(mm, vma, address,
 					pte, pmd, ptl, entry);
+           }
 		entry = pte_mkdirty(entry);
 	}
 	entry = pte_mkyoung(entry);

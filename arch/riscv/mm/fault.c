@@ -28,7 +28,8 @@ asmlinkage void do_page_fault(struct pt_regs *regs)
 	tsk = current;
 	mm = tsk->mm;
 
-	/*
+        printk("New page fault on %lx\n", addr);
+        /*
 	 * Fault-in kernel-space virtual memory on-demand.
 	 * The 'reference' page table is init_mm.pgd.
 	 *
