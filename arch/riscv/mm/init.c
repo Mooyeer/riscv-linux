@@ -46,7 +46,7 @@ static void __init zone_sizes_init(void)
 
 void setup_zero_page(void)
 {
-	memset((void *)empty_zero_page, 0, PAGE_SIZE);
+   memset_tags((void *)empty_zero_page, 0, PAGE_SIZE, 0);
 }
 
 void __init paging_init(void)

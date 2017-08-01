@@ -9,6 +9,8 @@
 #include <linux/hardirq.h>
 
 #include <asm/cacheflush.h>
+#include <asm/encoding.h>
+
 
 #ifndef ARCH_HAS_FLUSH_ANON_PAGE
 static inline void flush_anon_page(struct vm_area_struct *vma, struct page *page, unsigned long vmaddr)
@@ -136,6 +138,13 @@ static inline void clear_user_highpage(struct page *page, unsigned long vaddr)
 	clear_user_page(addr, vaddr, page);
 	kunmap_atomic(addr);
 }
+
+static inline void clear_user_highpage_and_tags(struct page *page, unsigned long vaddr)
+{
+	void *addr = kmap_atomic(page);
+	clear_user_page_and_tags(addr, vaddr, page);
+	kunmap_atomic(addr);
+}
 #endif
 
 #ifndef __HAVE_ARCH_ALLOC_ZEROED_USER_HIGHPAGE
@@ -163,7 +172,6 @@ __alloc_zeroed_user_highpage(gfp_t movableflags,
 
 	if (page)
 		clear_user_highpage(page, vaddr);
-
 	return page;
 }
 #endif
@@ -230,6 +238,23 @@ static inline void copy_user_highpage(struct page *to, struct page *from,
 	vfrom = kmap_atomic(from);
 	vto = kmap_atomic(to);
 	copy_user_page(vto, vfrom, vaddr, to);
+	kunmap_atomic(vto);
+	kunmap_atomic(vfrom);
+}
+
+static inline void copy_user_highpage_and_tags(struct page *to, struct page *from,
+	unsigned long vaddr, struct vm_area_struct *vma)
+{
+	char *vfrom, *vto;
+        unsigned long save_stagctrl;
+        unsigned long copy_stagctrl = TMASK_LOAD_PROP | TMASK_STORE_PROP;
+
+	vfrom = kmap_atomic(from);
+	vto = kmap_atomic(to);
+        save_stagctrl = read_csr(stagctrl);
+        write_csr(stagctrl, copy_stagctrl);
+	copy_user_page(vto, vfrom, vaddr, to);
+        write_csr(stagctrl, save_stagctrl);
 	kunmap_atomic(vto);
 	kunmap_atomic(vfrom);
 }

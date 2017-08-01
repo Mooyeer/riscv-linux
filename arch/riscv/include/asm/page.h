@@ -37,6 +37,7 @@
 #define copy_page(to, from)			memcpy((to), (from), PAGE_SIZE)
 
 #define clear_user_page(pgaddr, vaddr, page)	memset((pgaddr), 0, PAGE_SIZE)
+#define clear_user_page_and_tags(pgaddr, vaddr, page) memset_tags((pgaddr), 0, PAGE_SIZE, 0)
 #define copy_user_page(vto, vfrom, vaddr, topg) \
 			memcpy((vto), (vfrom), PAGE_SIZE)
 
