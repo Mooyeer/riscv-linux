@@ -1776,8 +1776,9 @@ static int setup_swap_extents(struct swap_info_struct *sis, sector_t *span)
 }
 
 static void _enable_swap_info(struct swap_info_struct *p, int prio,
-				unsigned char *swap_map,
-				struct swap_cluster_info *cluster_info)
+			      unsigned char *swap_map,
+                              struct swap_cluster_info *cluster_info,
+                              unsigned char *tags)
 {
 	if (prio >= 0)
 		p->prio = prio;
@@ -1790,6 +1791,7 @@ static void _enable_swap_info(struct swap_info_struct *p, int prio,
 	p->list.prio = -p->prio;
 	p->avail_list.prio = -p->prio;
 	p->swap_map = swap_map;
+        p->tags = tags;
 	p->cluster_info = cluster_info;
 	p->flags |= SWP_WRITEOK;
 	atomic_long_add(p->pages, &nr_swap_pages);
@@ -1815,12 +1817,13 @@ static void _enable_swap_info(struct swap_info_struct *p, int prio,
 static void enable_swap_info(struct swap_info_struct *p, int prio,
 				unsigned char *swap_map,
 				struct swap_cluster_info *cluster_info,
-				unsigned long *frontswap_map)
+                                unsigned long *frontswap_map,
+                                unsigned char *tags)
 {
 	frontswap_init(p->type, frontswap_map);
 	spin_lock(&swap_lock);
 	spin_lock(&p->lock);
-	 _enable_swap_info(p, prio, swap_map, cluster_info);
+        _enable_swap_info(p, prio, swap_map, cluster_info, tags);
 	spin_unlock(&p->lock);
 	spin_unlock(&swap_lock);
 }
@@ -1829,7 +1832,7 @@ static void reinsert_swap_info(struct swap_info_struct *p)
 {
 	spin_lock(&swap_lock);
 	spin_lock(&p->lock);
-	_enable_swap_info(p, p->prio, p->swap_map, p->cluster_info);
+	_enable_swap_info(p, p->prio, p->swap_map, p->cluster_info, p->tags);
 	spin_unlock(&p->lock);
 	spin_unlock(&swap_lock);
 }
@@ -1838,6 +1841,7 @@ SYSCALL_DEFINE1(swapoff, const char __user *, specialfile)
 {
 	struct swap_info_struct *p = NULL;
 	unsigned char *swap_map;
+        unsigned char *tags;
 	struct swap_cluster_info *cluster_info;
 	unsigned long *frontswap_map;
 	struct file *swap_file, *victim;
@@ -1941,6 +1945,8 @@ SYSCALL_DEFINE1(swapoff, const char __user *, specialfile)
 	p->max = 0;
 	swap_map = p->swap_map;
 	p->swap_map = NULL;
+        tags = p->tags;
+        p->tags = NULL;
 	cluster_info = p->cluster_info;
 	p->cluster_info = NULL;
 	frontswap_map = frontswap_map_get(p);
@@ -1952,6 +1958,7 @@ SYSCALL_DEFINE1(swapoff, const char __user *, specialfile)
 	free_percpu(p->percpu_cluster);
 	p->percpu_cluster = NULL;
 	vfree(swap_map);
+        vfree(tags);
 	vfree(cluster_info);
 	vfree(frontswap_map);
 	/* Destroy swap account information */
@@ -2389,6 +2396,8 @@ SYSCALL_DEFINE2(swapon, const char __user *, specialfile, int, swap_flags)
 	sector_t span;
 	unsigned long maxpages;
 	unsigned char *swap_map = NULL;
+        unsigned char *tags = NULL;
+        int size;
 	struct swap_cluster_info *cluster_info = NULL;
 	unsigned long *frontswap_map = NULL;
 	struct page *page = NULL;
@@ -2454,6 +2463,19 @@ SYSCALL_DEFINE2(swapon, const char __user *, specialfile, int, swap_flags)
 		error = -ENOMEM;
 		goto bad_swap;
 	}
+
+        /* Try to set up tag space. 
+         * Should find a way to include encoding.h, so we can get tag bits defines.
+         * Should probably also set up some sort of architecture define for this */
+        size = maxpages * (PAGE_SIZE/sizeof(unsigned long));
+        tags = vzalloc(size);
+        if (!tags) {
+               error = -ENOMEM;
+               goto bad_swap;
+        }
+        pr_info("Allocated tag array for swap space\n");
+        
+
 	if (p->bdev && blk_queue_nonrot(bdev_get_queue(p->bdev))) {
 		int cpu;
 
@@ -2531,7 +2553,7 @@ SYSCALL_DEFINE2(swapon, const char __user *, specialfile, int, swap_flags)
 	if (swap_flags & SWAP_FLAG_PREFER)
 		prio =
 		  (swap_flags & SWAP_FLAG_PRIO_MASK) >> SWAP_FLAG_PRIO_SHIFT;
-	enable_swap_info(p, prio, swap_map, cluster_info, frontswap_map);
+	enable_swap_info(p, prio, swap_map, cluster_info, frontswap_map, tags);
 
 	pr_info("Adding %uk swap on %s.  Priority:%d extents:%d across:%lluk %s%s%s%s%s\n",
 		p->pages<<(PAGE_SHIFT-10), name->name, p->prio,
@@ -2561,9 +2583,11 @@ bad_swap:
 	swap_cgroup_swapoff(p->type);
 	spin_lock(&swap_lock);
 	p->swap_file = NULL;
+        p->tags = NULL;
 	p->flags = 0;
 	spin_unlock(&swap_lock);
 	vfree(swap_map);
+        vfree(tags);
 	vfree(cluster_info);
 	if (swap_file) {
 		if (inode && S_ISREG(inode->i_mode)) {
