@@ -4,6 +4,7 @@
 # Then include just this.
 !arch/
 !mm/
+!include/
 !.gitignore
 !README.md
 
