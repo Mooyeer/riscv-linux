@@ -142,7 +142,7 @@ void queue_write(volatile uint32_t *const sd_ptr, uint32_t val, int flush)
  {
    struct etrans tmp;
    spin_lock(&sbi_timer_lock);
-#if 1
+#if 0
    flush = 1;
 #endif   
    tmp.mode = edcl_mode_write;
@@ -278,23 +278,34 @@ static void keyb_init_timer(void)
     printk(KERN_INFO "keyb_timer is started\n");
 }
 
+volatile uint32_t * const video_base = (volatile uint32_t*)(10<<20);
+
+static char old_video[4096];
+
+static void video_write(int addr, unsigned char ch)
+{
+  old_video[addr&4095] = ch;
+  queue_write(video_base+addr, ch, 0);
+}
+
 static void minion_console_putchar(unsigned char ch)
 {
   static int addr_int = 0;
-  volatile uint32_t * const video_base = (volatile uint32_t*)(10<<20);
-  if (ch != 10) queue_write(video_base+addr_int, ch, 0);
-  else
+  switch(ch)
     {
-      while ((addr_int & 127) < 127)
-         {
-	   queue_write(video_base+addr_int, ' ', 1);
-	   addr_int++;
-         }
+    case 8: case 127: if (addr_int & 127) --addr_int; break;
+    case 13: addr_int = addr_int & -128; break;
+    case 10: addr_int = (addr_int|127)+1; break;
+    default: video_write(addr_int++, ch);
     }
-  if (++addr_int >= 4096)
+  if (addr_int >= 4096-128)
     {
-      // this is where we would scroll
-      addr_int = 0;
+      // this is where we scroll
+      memcpy(old_video, old_video+128, 4096-128);
+      memset(old_video+4096-128, ' ', 128);
+      for (addr_int = 0; addr_int < 4096; addr_int++)
+	queue_write(video_base+addr_int, old_video[addr_int], 0);
+      addr_int = 4096-256;
     }
   sbi_console_putchar(ch);
 }
