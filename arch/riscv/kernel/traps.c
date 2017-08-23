@@ -10,6 +10,7 @@
 #include <asm/processor.h>
 #include <asm/ptrace.h>
 #include <asm/csr.h>
+#include <asm/encoding.h>
 
 int show_unhandled_signals = 1;
 
@@ -71,6 +72,9 @@ void do_trap(struct pt_regs *regs, int signo, int code,
 		show_regs(regs);
 	}
 
+        if (regs->scause == CAUSE_TAG_CHECK_FAIL) {
+           printk("Got tag exception\n");
+        }
 	do_trap_siginfo(signo, code, addr, tsk);
 }
 
@@ -97,6 +101,8 @@ DO_ERROR_INFO(do_trap_insn_misaligned,
 	SIGBUS, BUS_ADRALN, "instruction address misaligned");
 DO_ERROR_INFO(do_trap_insn_illegal,
 	SIGILL, ILL_ILLOPC, "illegal instruction");
+DO_ERROR_INFO(do_trap_tag_exception,
+        SIGILL, ILL_TAGEXC, "tag exception");
 
 asmlinkage void do_trap_break(struct pt_regs *regs)
 {
