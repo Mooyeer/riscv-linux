@@ -47,6 +47,10 @@
 
 #include <asm/mman.h>
 
+/* Added for tagging */
+#include <linux/binfmts.h>
+#include <linux/elf.h>
+
 /*
  * Shared mappings implemented 30.11.1994. It's not fully working yet,
  * though.
@@ -2131,6 +2135,110 @@ page_not_uptodate:
 }
 EXPORT_SYMBOL(filemap_fault);
 
+/* This almost certainly is filled with race conditions and needs
+ * locking. Need to: make sure the page doesn't get unmapped somehow
+ * between mapping to it and calling here. Once here, we need to make
+ * sure the page doesn't get unmapped, which I think calling lock_page
+ * would take care of. Possibly we need to do something with mm_sem
+ * Also  in a multithreaded context, need to make sure the page
+ * doesn't get written to while we are writing to it. In a
+ * single-threaded context, it's fine, because kmap_atomic disables 
+ * preemption 
+ */
+static void get_tags_from_elf(struct vm_area_struct *vma, unsigned long address, struct page *page) {
+   struct file *elf_file = vma->vm_file;
+   struct elfhdr header;
+   struct elf_shdr *strings_header, *sh_headers, *sh_header, *tags_header = NULL;
+   elf_addr_t str_table_offset;
+   char *strings;
+   int retval, i;
+   unsigned char tags[PAGE_SIZE/sizeof(unsigned long)];
+   unsigned long save_tagctrl, val, tag_index;
+   unsigned char tag;
+   unsigned long *u_addr;
+
+    /* read ELF header */
+   retval = kernel_read(elf_file, 0, (char *)(&header), sizeof(struct elfhdr));
+   if (retval < 0) {
+      return;
+   }
+   
+   /* get section headers */
+   sh_headers = kmalloc((header.e_shnum) * (header.e_shentsize), GFP_KERNEL);
+   if (!sh_headers) {
+      return;
+   }
+   retval = kernel_read(elf_file, header.e_shoff, (char * )sh_headers, (header.e_shnum) * (header.e_shentsize));
+   if (retval < 0) {
+      goto out_shheaders;
+   }
+   
+   /* find strings */
+   strings_header = sh_headers + header.e_shstrndx;
+   str_table_offset = strings_header->sh_offset;
+   
+   /* get strings */
+   strings = kmalloc(strings_header->sh_size, GFP_KERNEL);
+   if (!strings) {
+      goto out_shheaders;
+   }
+   retval = kernel_read(elf_file, str_table_offset, strings, strings_header->sh_size);
+   if (retval < 0) {
+      goto out_strings;
+   }
+
+      /* search strings for .tags */
+   for (i = 0; i < header.e_shnum; i++) {
+      sh_header = sh_headers + i;
+      
+      if (strncmp(".tags", strings + sh_header->sh_name, strings_header->sh_size) == 0) {
+         tags_header = sh_header;
+      }
+
+   } 
+   
+   /* if there is no tag section */
+   if (tags_header == NULL) {
+      goto out_strings;
+   }
+   //printk("Reading tags\n");
+   save_tagctrl = read_csr(stagctrl);
+   write_csr(stagctrl, TMASK_LOAD_PROP | TMASK_STORE_PROP);
+
+   // calculate offset in file
+   // use fault address, vm_start, and vm_pgoff to calculate where we are in the file
+   //file_offset = (address - vma->vm_start) + PAGE_SIZE*(vma->vm_pgoff);
+
+   // calculate tag index in tag section
+   tag_index = address/sizeof(unsigned long);
+
+   // read in a page-sized array of tags
+   retval = kernel_read(elf_file, (tags_header->sh_offset) + tag_index, (char *)(tags), PAGE_SIZE/sizeof(unsigned long));
+
+   if (retval < 0) {
+      goto out_strings;
+   }
+
+   u_addr = (unsigned long *)page_to_virt(page);
+   lock_page(page);
+
+   for (i = 0; i < PAGE_SIZE/sizeof(unsigned long); i++) {
+      val = *(u_addr + i);
+      tag = tags[i];
+      set_tagged_val((uint64_t *)(u_addr + i), val, tag);
+      
+   }
+   unlock_page(page);
+
+   write_csr(stagctrl, save_tagctrl);
+
+out_strings:
+   kfree(strings);
+
+out_shheaders:
+   kfree(sh_headers);
+}
+
 void filemap_map_pages(struct vm_area_struct *vma, struct vm_fault *vmf)
 {
 	struct radix_tree_iter iter;
@@ -2191,6 +2299,13 @@ repeat:
 		addr = address + (page->index - vmf->pgoff) * PAGE_SIZE;
 		do_set_pte(vma, addr, page, pte, false, false);
 		unlock_page(page);
+                /* do we need to grab mmap_sem here? */
+                /* check if the backing store is an ELF file */
+                if (vma->vm_mm->binfmt && ((vma->vm_mm->binfmt) == &elf_format)) {
+                   // go to find tags in the elf
+                   get_tags_from_elf(vma, addr, page);
+                }
+
 		goto next;
 unlock:
 		unlock_page(page);

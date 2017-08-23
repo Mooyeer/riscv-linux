@@ -176,6 +176,22 @@
 #define rdcycle() read_csr(cycle)
 #define rdinstret() read_csr(instret)
 
+/*** These are helper functions for getting/setting tags in memory. 
+ *** There may be a better palce to define these
+ ***/
+static inline uint8_t get_tagged_val(uint64_t *src, uint64_t *out) {
+  uint8_t tag;
+  uint64_t val;
+  asm volatile( "ld %0, 0(%2); tagr %1, %0; tagw %0, zero;" : "=r" (val), "=r" (tag) : "r" (src));
+  *out = val;
+  return tag;
+}
+
+static inline void set_tagged_val(uint64_t *dst, uint64_t val, uint8_t tag) {
+  asm volatile ( "tagw %0, %1; sd %0, 0(%2); tagw %0, zero;" : : "r" (val), "r" (tag), "r" (dst));
+}
+
+
 #endif
 
 #endif
