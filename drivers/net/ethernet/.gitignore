@@ -1,3 +1,5 @@
 # In ../, we ignored everything, so suppress that.
 !lowrisc/
+!Kconfig
+!Makefile
 
