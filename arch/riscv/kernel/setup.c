@@ -156,21 +156,56 @@ static struct spi_board_info lowrisc_spi_board_info[] __initdata = {
 #endif
 };
 
+// The following is a patch to support Digilent Nexys4-DDR ethernet
+
+static struct resource lowrisc_ethernet[] = {
+	[0] = {
+		.start = 0,
+		.end   = 0x1FFF,
+		.flags = IORESOURCE_MEM,
+	},
+};
+
+struct xethernet_platform_data {
+        void *devices;
+        u8 num_devices;
+};
+
+static struct platform_device xethernet_device = {
+	.name = "lowrisc_digilent_ethernet",
+	.id = -1, /* Bus number */
+	.num_resources = ARRAY_SIZE(lowrisc_ethernet),
+	.resource = lowrisc_ethernet,
+};
+
 static int __init lowrisc_setup_devinit(void)
 {
 	int ret;
-	u64 spi_addr;
 
 #if IS_ENABLED(CONFIG_SPI_XILINX)
+        {
 	// Find config string driver
 	struct device *csdev = bus_find_device_by_name(&platform_bus_type, NULL, "config-string");
 	struct platform_device *pcsdev = to_platform_device(csdev);
-	spi_addr = config_string_u64(pcsdev, "spi.addr");
+	u64 spi_addr = config_string_u64(pcsdev, "spi.addr");
 	lowrisc_spi[0].start += spi_addr;
 	lowrisc_spi[0].end += spi_addr;
 	ret = platform_device_register(&xspi_device);
 
 	spi_register_board_info(lowrisc_spi_board_info, ARRAY_SIZE(lowrisc_spi_board_info));
+        }
+#endif
+
+#if IS_ENABLED(CONFIG_LOWRISC_DIGILENT_100MHZ)
+        {
+	// Find config string driver
+	struct device *csdev = bus_find_device_by_name(&platform_bus_type, NULL, "config-string");
+	struct platform_device *pcsdev = to_platform_device(csdev);
+	u64 ethernet_addr = config_string_u64(pcsdev, "eth.addr");
+	lowrisc_ethernet[0].start += ethernet_addr;
+	lowrisc_ethernet[0].end += ethernet_addr;
+	ret = platform_device_register(&xethernet_device);
+        }
 #endif
 
 	return 0;
