@@ -3,7 +3,7 @@
 
 # Then include just this.
 !arch/
-!drivers/net/ethernet
+!drivers/
 !.gitignore
 !README.md
 
