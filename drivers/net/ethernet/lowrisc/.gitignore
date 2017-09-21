@@ -1,0 +1,4 @@
+# In ../, we ignored everything, so suppress that.
+!Makefile
+!Kconfig
+!lowrisc_100MHz.[ch]
