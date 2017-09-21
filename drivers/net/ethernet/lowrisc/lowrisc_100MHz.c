@@ -1,5 +1,5 @@
 /*
- * Minion EtherTAP Linux driver for the Minion Ethernet TAP device.
+ * Lowrisc Ether100MHz Linux driver for the Lowrisc Ethernet 100MHz device.
  *
  * This is an experimental driver which is based on the original emac_lite
  * driver from John Williams <john.williams@xilinx.com>.
@@ -56,7 +56,7 @@
 
 #define DRIVER_AUTHOR	"WOOJUNG HUH <woojung.huh@microchip.com>"
 #define DRIVER_DESC	"Microchip LAN8720 PHY driver"
-#define DRIVER_NAME "minion_etherTAP"
+#define DRIVER_NAME "lowrisc_ether100MHz"
 
 /* General Ethernet Definitions */
 #define XEL_ARP_PACKET_SIZE		28	/* Max ARP packet size */
@@ -68,16 +68,10 @@
 /* BUFFER_ALIGN(adr) calculates the number of bytes to the next alignment. */
 #define BUFFER_ALIGN(adr) ((ALIGNMENT - ((size_t) adr)) % ALIGNMENT)
 
-struct timer_list tap_timer;
-
 /**
  * struct net_local - Our private per device data
  * @ndev:		instance of the network device
- * @next_tx_buf_to_use:	next Tx buffer to write to
- * @next_rx_buf_to_use:	next Rx buffer to read from
  * @reset_lock:		lock used for synchronization
- * @deferred_skb:	holds an skb (for transmission at a later time) when the
- *			Tx buffer is not free
  * @phy_dev:		pointer to the PHY device
  * @phy_node:		pointer to the PHY device node
  * @mii_bus:		pointer to the MII bus
@@ -86,21 +80,7 @@ struct timer_list tap_timer;
 struct net_local {
   struct mdiobb_ctrl ctrl; /* must be first for bitbang driver to work */
   void __iomem *ioaddr;
-  struct pci_dev *pdev;
   struct net_device *dev;
-  
-  dma_addr_t rx_dma_addr;
-  dma_addr_t tx_dma_addr;
-  int tx_ring_head, tx_ring_tail;
-  int rx_ring_head, rx_ring_tail;
-  
-  spinlock_t int_lock;
-  spinlock_t phy_lock;
-  
-  struct napi_struct napi;
-  
-  bool software_irq_signal;
-  bool rx_csum;
   u32 msg_enable;
   
   struct phy_device *phy_dev;
@@ -109,111 +89,28 @@ struct net_local {
   int last_carrier;
   
   struct net_device *ndev;
-  
-  u32 next_tx_buf_to_use;
-  u32 next_rx_buf_to_use;
-  
-  spinlock_t reset_lock;
-  struct sk_buff *deferred_skb;
-  
-  int last_link;
+    
   /* Spinlock */
   spinlock_t lock;
-  spinlock_t stats_lock;
-  /* Counter */
-  int count;
+  uint16_t mdio_regs_cache[32];
   
 };
 
-static volatile unsigned int *eth_base;
-
-static void axi_write(size_t addr, int data)
+static void axi_write(struct net_local *lp, size_t addr, int data)
 {
-  if (addr < 0x2000)
-    eth_base[addr >> 2] = data;
-  else
-    printk("axi_write(%lx,%x) out of range\n", addr, data);
+  volatile unsigned int *eth_base = (volatile unsigned int *)(lp->ioaddr);
+  eth_base[addr >> 2] = data;
 }
 
-static int axi_read(size_t addr)
+static int axi_read(struct net_local *lp, size_t addr)
 {
-  if (addr < 0x2000)
-    return eth_base[addr >> 2];
-  else
-    printk("axi_read(%lx) out of range\n", addr);
-  return -1;
+  volatile unsigned int *eth_base = (volatile unsigned int *)(lp->ioaddr);
+  return eth_base[addr >> 2];
 }
 
 /**
- * minion_send_data - Send an Ethernet frame
- * @drvdata:	Pointer to the EtherTAP device private data
- * @data:	Pointer to the data to be sent
- * @byte_count:	Total frame size, including header
- *
- * This function checks if the Tx buffer of the EtherTAP device is free to send
- * data. If so, it fills the Tx buffer with data for transmission. Otherwise, it
- * returns an error.
- *
- * Return:	0 upon success or -1 if the buffer(s) are full.
- *
- * Note:	The maximum Tx packet size can not be more than Ethernet header
- *		(14 Bytes) + Maximum MTU (1500 bytes). This is excluding FCS.
- */
-static int minion_send_data(struct net_local *drvdata, u8 *data,
-			       unsigned int byte_count)
-{
-  uint32_t *alloc = (uint32_t *)data;
-  int i, rslt = axi_read(TPLR_OFFSET);
-  printk("TX Status = %x\n", rslt);
-  if (rslt & TPLR_BUSY_MASK) return -1;
-  for (i = 0; i < (((byte_count-1)|3)+1)/4; i++)
-    {
-      axi_write(TXBUFF_OFFSET+(i<<2), alloc[i]);
-    }
-  axi_write(TPLR_OFFSET,byte_count);
-  printk("send, len=%X\n", byte_count);
-  return 0;
-}
-
-/**
- * minion_recv_data - Receive a frame
- * @drvdata:	Pointer to the EtherTAP device private data
- * @data:	Address where the data is to be received
- *
- * This function is intended to be called from the interrupt context or
- * with a wrapper which waits for the receive frame to be available.
- *
- * Return:	Total number of bytes received
- */
-
-static u16 minion_recv_data(struct net_local *drvdata, u8 *data)
-{
-  int i;
-  int fcs = axi_read(RFCS_OFFSET);
-  int rplr = axi_read(RPLR_OFFSET);
-  int length = (rplr & RPLR_LENGTH_MASK) >> 16;
-  if ((length >= 14) && (fcs == 0xc704dd7b))
-    {
-      int rnd;
-      uint32_t *alloc;
-      length -= 4; /* discard FCS bytes */
-      rnd = (((length-1)|3)+1); /* round to a multiple of 4 */
-      alloc = (uint32_t *)data;
-      for (i = 0; i < rnd/4; i++)
-        {
-          alloc[i] = axi_read(RXBUFF_OFFSET+(i<<2));
-        }
-      printk("recv, len=%X\n", length);
-    }
-  else
-    length = 0;
-  axi_write(RSR_OFFSET, 0); /* acknowledge, even if an error occurs, to reset irq */
-  return length;
-}
-
-/**
- * minion_update_address - Update the MAC address in the device
- * @drvdata:	Pointer to the EtherTAP device private data
+ * lowrisc_update_address - Update the MAC address in the device
+ * @drvdata:	Pointer to the Ether100MHz device private data
  * @address_ptr:Pointer to the MAC address (MAC address is a 48-bit value)
  *
  * Tx must be idle and Rx should be idle for deterministic results.
@@ -223,17 +120,20 @@ static u16 minion_recv_data(struct net_local *drvdata, u8 *data)
  * buffers (if configured).
  */
 
-static void minion_update_address(struct net_local *drvdata, u8 *address_ptr)
+static void lowrisc_update_address(int irq_enable, struct net_local *lp, u8 *address_ptr)
 {
   uint32_t macaddr_lo, macaddr_hi;
+  uint32_t flags, irqflags = (irq_enable ? MACHI_IRQ_EN : 0);
+  printk("%s interrupts\n", irqflags ? "Enable" : "Disable");
+  flags = MACHI_ALLPACKETS_MASK|MACHI_DATA_DLY_MASK|MACHI_COOKED_MASK;
   memcpy (&macaddr_lo, address_ptr+2, sizeof(uint32_t));
   memcpy (&macaddr_hi, address_ptr+0, sizeof(uint16_t));
-  axi_write(MACLO_OFFSET, htonl(macaddr_lo));
-  axi_write(MACHI_OFFSET, MACHI_IRQ_EN|MACHI_ALLPACKETS_MASK|MACHI_DATA_DLY_MASK|MACHI_COOKED_MASK|htons(macaddr_hi));
+  axi_write(lp, MACLO_OFFSET, htonl(macaddr_lo));
+  axi_write(lp, MACHI_OFFSET, /* irqflags| */ flags|htons(macaddr_hi));
 }
 
 /**
- * minion_set_mac_address - Set the MAC address for this device
+ * lowrisc_set_mac_address - Set the MAC address for this device
  * @dev:	Pointer to the network device instance
  * @addr:	Void pointer to the sockaddr structure
  *
@@ -243,26 +143,25 @@ static void minion_update_address(struct net_local *drvdata, u8 *address_ptr)
  * Return:	Error if the net device is busy or 0 if the addr is set
  *		successfully
  */
-static int minion_set_mac_address(struct net_device *dev, void *address)
+static int lowrisc_set_mac_address(struct net_device *ndev, void *address)
 {
-	struct net_local *lp = netdev_priv(dev);
+	struct net_local *lp = netdev_priv(ndev);
 	struct sockaddr *addr = address;
-	
-	memcpy(dev->dev_addr, addr->sa_data, dev->addr_len);
-	minion_update_address(lp, dev->dev_addr);
+	int irq_enable = axi_read(lp, MACHI_OFFSET) & MACHI_IRQ_EN;
+	memcpy(ndev->dev_addr, addr->sa_data, ndev->addr_len);
+	lowrisc_update_address(irq_enable, lp, ndev->dev_addr);
 	return 0;
 }
 
 /**
- * minion_tx_timeout - Callback for Tx Timeout
+ * lowrisc_tx_timeout - Callback for Tx Timeout
  * @dev:	Pointer to the network device
  *
- * This function is called when Tx time out occurs for EtherTAP device.
+ * This function is called when Tx time out occurs for Ether100MHz device.
  */
-static void minion_tx_timeout(struct net_device *dev)
+static void lowrisc_tx_timeout(struct net_device *dev)
 {
 	struct net_local *lp = netdev_priv(dev);
-	unsigned long flags;
 
 	dev_err(&lp->ndev->dev, "Exceeded transmit timeout of %lu ms\n",
 		TX_TIMEOUT * 1000UL / HZ);
@@ -270,152 +169,36 @@ static void minion_tx_timeout(struct net_device *dev)
 	dev->stats.tx_errors++;
 
 	/* Reset the device */
-	spin_lock_irqsave(&lp->reset_lock, flags);
+	spin_lock(&lp->lock);
 
 	/* Shouldn't really be necessary, but shouldn't hurt */
 	netif_stop_queue(dev);
-
-	if (lp->deferred_skb) {
-		dev_kfree_skb(lp->deferred_skb);
-		lp->deferred_skb = NULL;
-		dev->stats.tx_errors++;
-	}
 
 	/* To exclude tx timeout */
 	dev->trans_start = jiffies; /* prevent tx timeout */
 
 	/* We're all ready to go. Start the queue */
 	netif_wake_queue(dev);
-	spin_unlock_irqrestore(&lp->reset_lock, flags);
-}
-
-/**********************/
-/* Interrupt Handlers */
-/**********************/
-
-/**
- * minion_tx_handler - Interrupt handler for frames sent
- * @dev:	Pointer to the network device
- *
- * This function updates the number of packets transmitted and handles the
- * deferred skb, if there is one.
- */
-static void minion_tx_handler(struct net_device *dev)
-{
-	struct net_local *lp = netdev_priv(dev);
-
-	dev->stats.tx_packets++;
-	if (lp->deferred_skb) {
-		if (minion_send_data(lp,
-					(u8 *) lp->deferred_skb->data,
-					lp->deferred_skb->len) != 0)
-			return;
-		else {
-			dev->stats.tx_bytes += lp->deferred_skb->len;
-			dev_kfree_skb_irq(lp->deferred_skb);
-			lp->deferred_skb = NULL;
-			dev->trans_start = jiffies; /* prevent tx timeout */
-			netif_wake_queue(dev);
-		}
-	}
+	spin_unlock(&lp->lock);
 }
 
 /**
- * minion_rx_handler- Interrupt handler for frames received
- * @dev:	Pointer to the network device
- *
- * This function allocates memory for a socket buffer, fills it with data
- * received and hands it over to the TCP/IP stack.
- */
-static void minion_rx_handler(struct net_device *ndev)
-{
-	u32 len = ETH_FRAME_LEN + ETH_FCS_LEN;
-	struct net_local *lp = netdev_priv(ndev);
-	static struct sk_buff *skb;
-	unsigned int align;
-	skb = netdev_alloc_skb(ndev, len + ALIGNMENT);
-	if (!skb) {
-		/* Couldn't get memory. */
-		ndev->stats.rx_dropped++;
-		dev_err(&lp->ndev->dev, "Could not allocate receive buffer\n");
-		return;
-	}
-
-	/*
-	 * A new skb should have the data halfword aligned, but this code is
-	 * here just in case that isn't true. Calculate how many
-	 * bytes we should reserve to get the data to start on a word
-	 * boundary */
-	align = BUFFER_ALIGN(skb->data);
-	if (align)
-		skb_reserve(skb, align);
-
-	skb_reserve(skb, 2);
-
-	len = minion_recv_data(lp, (u8 *) skb->data);
-
-	if (!len) {
-		ndev->stats.rx_errors++;
-		dev_kfree_skb_irq(skb);
-		return;
-	}
-
-	skb_put(skb, len);	/* Tell the skb how much data we got */
-
-	skb->protocol = eth_type_trans(skb, ndev);
-	skb_checksum_none_assert(skb);
-
-	ndev->stats.rx_packets++;
-	ndev->stats.rx_bytes += len;
-
-	if (!skb_defer_rx_timestamp(skb))
-		netif_rx(skb);	/* Send the packet upstream */
-}
-
-/**
- * minion_open - Open the network device
- * @dev:	Pointer to the network device
- *
- * This function sets the MAC address, requests an IRQ and enables interrupts
- * for the EtherTAP device and starts the Tx queue.
- * It also connects to the phy device, if MDIO is included in EtherTAP device.
- */
-static int minion_open(struct net_device *dev)
-{
-	struct net_local *lp = netdev_priv(dev);
-
-	if (lp->phy_dev) {
-		/* EtherTAP doesn't support giga-bit speeds */
-		lp->phy_dev->supported &= (PHY_BASIC_FEATURES);
-		lp->phy_dev->advertising = lp->phy_dev->supported;
-
-		phy_start(lp->phy_dev);
-	}
-
-	/* Set the MAC address each time opened */
-	minion_update_address(lp, dev->dev_addr);
-
-	/* We're ready to go */
-	netif_start_queue(dev);
-
-	return 0;
-}
-
-/**
- * minion_close - Close the network device
+ * lowrisc_close - Close the network device
  * @dev:	Pointer to the network device
  *
  * This function stops the Tx queue, disables interrupts and frees the IRQ for
- * the EtherTAP device.
- * It also disconnects the phy device associated with the EtherTAP device.
+ * the Ether100MHz device.
+ * It also disconnects the phy device associated with the Ether100MHz device.
  */
-static int minion_close(struct net_device *dev)
+static int lowrisc_close(struct net_device *ndev)
 {
-	struct net_local *lp = netdev_priv(dev);
+	struct net_local *lp = netdev_priv(ndev);
 
-	netif_stop_queue(dev);
-	free_irq(dev->irq, dev);
-
+	netif_stop_queue(ndev);
+	lowrisc_update_address(0, lp, ndev->dev_addr);
+	free_irq(IRQ_SOFTWARE, ndev);
+        printk("Close device, free interrupt\n");
+        
 	if (lp->phy_dev)
 		phy_disconnect(lp->phy_dev);
 	lp->phy_dev = NULL;
@@ -424,126 +207,29 @@ static int minion_close(struct net_device *dev)
 }
 
 /**
- * minion_send - Transmit a frame
- * @orig_skb:	Pointer to the socket buffer to be transmitted
- * @dev:	Pointer to the network device
- *
- * This function checks if the Tx buffer of the EtherTAP device is free to send
- * data. If so, it fills the Tx buffer with data from socket buffer data,
- * updates the stats and frees the socket buffer. The Tx completion is signaled
- * by an interrupt. If the Tx buffer isn't free, then the socket buffer is
- * deferred and the Tx queue is stopped so that the deferred socket buffer can
- * be transmitted when the EtherTAP device is free to transmit data.
- *
- * Return:	0, always.
- */
-static int minion_send(struct sk_buff *orig_skb, struct net_device *dev)
-{
-	struct net_local *lp = netdev_priv(dev);
-	struct sk_buff *new_skb;
-	unsigned int len;
-	unsigned long flags;
-
-	len = orig_skb->len;
-
-	new_skb = orig_skb;
-
-	spin_lock_irqsave(&lp->reset_lock, flags);
-	if (minion_send_data(lp, (u8 *) new_skb->data, len) != 0) {
-		/* If the EtherTAP Tx buffer is busy, stop the Tx queue and
-		 * defer the skb for transmission during the ISR, after the
-		 * current transmission is complete */
-		netif_stop_queue(dev);
-		lp->deferred_skb = new_skb;
-		/* Take the time stamp now, since we can't do this in an ISR. */
-		skb_tx_timestamp(new_skb);
-		spin_unlock_irqrestore(&lp->reset_lock, flags);
-		return 0;
-	}
-	spin_unlock_irqrestore(&lp->reset_lock, flags);
-
-	skb_tx_timestamp(new_skb);
-
-	dev->stats.tx_bytes += len;
-	dev_consume_skb_any(new_skb);
-
-	return 0;
-}
-
-/**
- * minion_remove_ndev - Free the network device
+ * lowrisc_remove_ndev - Free the network device
  * @ndev:	Pointer to the network device to be freed
  *
- * This function un maps the IO region of the EtherTAP device and frees the net
+ * This function un maps the IO region of the Ether100MHz device and frees the net
  * device.
  */
-static void minion_remove_ndev(struct net_device *ndev)
+static void lowrisc_remove_ndev(struct net_device *ndev)
 {
 	if (ndev) {
 		free_netdev(ndev);
 	}
 }
 
-static void minion_poll_controller(struct net_device *dev)
-{
-	bool tx_complete = false;
-	struct net_local *lp = netdev_priv(dev);
-	u32 tx_status;
-	spin_lock(&(lp->lock));
-
-	/* Check if there is Rx Data available */
-	if (axi_read(RSR_OFFSET) & RSR_RECV_DONE_MASK)
-	  {
-	    minion_rx_handler(dev);
-	  }
-	/* Check if the Transmission is completed */
-	tx_status = 0;
-	if (tx_status)
-		tx_complete = true;
-
-	/* If there was a Tx interrupt, call the Tx Handler */
-	if (tx_complete != 0)
-		minion_tx_handler(dev);
-	lp->count++;
-	spin_unlock(&(lp->lock));
-}
-
-enum {inc=HZ}; // 1Hz
-
-static struct net_device_ops minion_netdev_ops;
-
-/* Timer callback */
-void tap_timer_callback(unsigned long arg)
-{
-  struct net_device *ndev = (struct net_device *)arg;
-  minion_poll_controller(ndev);
-  
-  mod_timer(&tap_timer, jiffies + inc); /* restarting timer */
-}
-
-static void tap_init_timer(struct net_device *ndev)
-{
-  init_timer(&tap_timer);
-  tap_timer.function = tap_timer_callback;
-  tap_timer.data = (unsigned long)ndev;
-  tap_timer.expires = jiffies + inc;
-  add_timer(&tap_timer); /* Starting the timer */
-  
-  printk(KERN_INFO "tap_timer is started\n");
-}
-
-static uint16_t mdio_regs_cache[32];
-
 static int smsc_mii_read(struct mii_bus *bus, int phyaddr, int regidx)
 {
 	struct net_local *pd = (struct net_local *)bus->priv;
 	int reg = -EIO;
 
-	spin_lock(&pd->phy_lock);
+	spin_lock(&pd->lock);
 
-	reg = mdio_regs_cache[regidx];
+	reg = pd->mdio_regs_cache[regidx];
 
-	spin_unlock(&pd->phy_lock);
+	spin_unlock(&pd->lock);
 	return reg;
 }
 
@@ -552,11 +238,11 @@ static int smsc_mii_write(struct mii_bus *bus, int phyaddr, int regidx,
 {
 	struct net_local *pd = (struct net_local *)bus->priv;
 
-	spin_lock(&pd->phy_lock);
+	spin_lock(&pd->lock);
 
-	mdio_regs_cache[regidx] = val;
+	pd->mdio_regs_cache[regidx] = val;
 	
-	spin_unlock(&pd->phy_lock);
+	spin_unlock(&pd->lock);
 
 	return 0;
 }
@@ -630,42 +316,46 @@ static uint32_t last_gpio;
 
 static void mdio_dir(struct mdiobb_ctrl *ctrl, int dir)
 {
+  struct net_local *lp = (struct net_local *)ctrl; /* struct mdiobb_ctrl must be first in net_local for bitbang driver to work */
   if (dir)
     last_gpio |= 1 << 2;
   else
     last_gpio &= ~ (1 << 2);
     
-  axi_write(MDIOCTRL_OFFSET, last_gpio);
+  axi_write(lp, MDIOCTRL_OFFSET, last_gpio);
 }
 
 static int mdio_get(struct mdiobb_ctrl *ctrl)
 {
-  uint32_t rslt = axi_read(MDIOCTRL_OFFSET);
+  struct net_local *lp = (struct net_local *)ctrl; /* struct mdiobb_ctrl must be first in net_local for bitbang driver to work */
+  uint32_t rslt = axi_read(lp, MDIOCTRL_OFFSET);
   return rslt >> 3;
 }
 
 static void mdio_set(struct mdiobb_ctrl *ctrl, int what)
 {
+  struct net_local *lp = (struct net_local *)ctrl; /* struct mdiobb_ctrl must be first in net_local for bitbang driver to work */
   if (what)
     last_gpio |= 1 << 1;
   else
     last_gpio &= ~ (1 << 1);
     
-  axi_write(MDIOCTRL_OFFSET, last_gpio);
+  axi_write(lp, MDIOCTRL_OFFSET, last_gpio);
 }
 
 static void mdc_set(struct mdiobb_ctrl *ctrl, int what)
 {
+  struct net_local *lp = (struct net_local *)ctrl; /* struct mdiobb_ctrl must be first in net_local for bitbang driver to work */
   if (what)
     last_gpio |= 1 << 0;
   else
     last_gpio &= ~ (1 << 0);
     
-  axi_write(MDIOCTRL_OFFSET, last_gpio);
+  axi_write(lp, MDIOCTRL_OFFSET, last_gpio);
 }
 
 /* reset callback */
-static int minion_reset(struct mii_bus *bus)
+static int lowrisc_reset(struct mii_bus *bus)
 {
   return 0;
 }
@@ -720,13 +410,13 @@ static int smsc_mii_init(struct net_device *dev)
 	int err = -ENXIO;
 #ifdef BITBANG
 	pd->ctrl.ops = &mdio_gpio_ops;
-	pd->ctrl.reset = minion_reset;
+	pd->ctrl.reset = lowrisc_reset;
         new_bus = alloc_mdio_bitbang(&(pd->ctrl));
 #else
 	new_bus = mdiobus_alloc();
 	new_bus->read = smsc_mii_read;
 	new_bus->write = smsc_mii_write;
-	memcpy(mdio_regs_cache, mdio_regs_init, sizeof(mdio_regs_cache));
+	memcpy(pd->mdio_regs_cache, mdio_regs_init, sizeof(pd->mdio_regs_cache));
 #endif	
 	if (!new_bus) {
 		err = -ENOMEM;
@@ -765,44 +455,247 @@ err_out_free_bus_2:
 err_out_1:
 	return err;
 }
+/**********************/
+/* Interrupt Handlers */
+/**********************/
+
+/**
+ * lowrisc_ether_isr - Interrupt handler for frames received
+ * @dev:	Pointer to the network device
+ *
+ * This function allocates memory for a socket buffer, fills it with data
+ * received and hands it over to the TCP/IP stack.
+ */
 
 irqreturn_t lowrisc_ether_isr(int irq, void *dev_id)
 {
   irqreturn_t rc = IRQ_NONE;
   struct net_device *ndev = dev_id;
   struct net_local *lp = netdev_priv(ndev);
-  int rxstatus;
+  static struct sk_buff *skb;
+  unsigned int align;
+  int rxstatus, i, fcs, rplr, len;
   spin_lock(&(lp->lock));
-  rxstatus = axi_read(RSR_OFFSET);
-  printk("lowrisc_ether_isr(%d,%p); /* status=%d */\n", irq, dev_id, rxstatus);
+  rxstatus = axi_read(lp, RSR_OFFSET);
     
   /* Check if there is Rx Data available */
   if (rxstatus & RSR_RECV_DONE_MASK)
     {
-      minion_rx_handler(ndev);
       rc = IRQ_HANDLED;
+      skb = netdev_alloc_skb(ndev, ETH_FRAME_LEN + ETH_FCS_LEN + ALIGNMENT);
+      if (!skb)
+        {
+          /* Couldn't get memory. */
+          ndev->stats.rx_dropped++;
+          dev_err(&lp->ndev->dev, "Could not allocate receive buffer\n");
+        }
+      else
+        {
+          /*
+           * A new skb should have the data halfword aligned, but this code is
+           * here just in case that isn't true. Calculate how many
+           * bytes we should reserve to get the data to start on a word
+           * boundary */
+          align = BUFFER_ALIGN(skb->data);
+          if (align)
+            skb_reserve(skb, align);
+          
+          skb_reserve(skb, 2);
+
+          fcs = axi_read(lp, RFCS_OFFSET);
+          rplr = axi_read(lp, RPLR_OFFSET);
+          len = (rplr & RPLR_LENGTH_MASK) >> 16;
+          if ((len >= 14) && (fcs == 0xc704dd7b))
+            {
+              int rnd;
+              uint32_t *alloc;
+              len -= 4; /* discard FCS bytes */
+              rnd = (((len-1)|3)+1); /* round to a multiple of 4 */
+              alloc = (uint32_t *)(skb->data);
+              for (i = 0; i < rnd/4; i++)
+                {
+                  alloc[i] = axi_read(lp, RXBUFF_OFFSET+(i<<2));
+                }
+              skb_put(skb, len);	/* Tell the skb how much data we got */
+              
+              skb->protocol = eth_type_trans(skb, ndev);
+              skb_checksum_none_assert(skb);
+              
+              ndev->stats.rx_packets++;
+              ndev->stats.rx_bytes += len;
+              
+              if (!skb_defer_rx_timestamp(skb))
+                netif_rx(skb);	/* Send the packet upstream */
+            }
+          else
+            {
+              ndev->stats.rx_errors++;
+              dev_kfree_skb_irq(skb);
+            }
+          axi_write(lp, RSR_OFFSET, 0); /* acknowledge, even if an error occurs, to reset irq */
+        }
     }
-  lp->count++;
   spin_unlock(&(lp->lock));
   
   return rc;
 }
 
 /**
- * minion_of_probe - Probe method for the EtherTAP device.
+ * lowrisc_open - Open the network device
+ * @dev:	Pointer to the network device
+ *
+ * This function sets the MAC address, requests an IRQ and enables interrupts
+ * for the Ether100MHz device and starts the Tx queue.
+ * It also connects to the phy device, if MDIO is included in Ether100MHz device.
+ */
+static int lowrisc_open(struct net_device *ndev)
+{
+  int retval;
+  struct net_local *lp = netdev_priv(ndev);
+
+  /* Set the MAC address each time opened */
+  lowrisc_update_address(0, lp, ndev->dev_addr);
+  
+  if (lp->phy_dev) {
+    /* Ether100MHz doesn't support giga-bit speeds */
+    lp->phy_dev->supported &= (PHY_BASIC_FEATURES);
+    lp->phy_dev->advertising = lp->phy_dev->supported;
+    
+    phy_start(lp->phy_dev);
+  }
+  
+  /* Grab the IRQ */
+  printk("Open device, request interrupt\n");
+  retval = request_irq(IRQ_SOFTWARE, lowrisc_ether_isr, IRQF_SHARED, ndev->name, ndev);
+  if (retval) {
+    dev_err(&lp->ndev->dev, "Could not allocate interrupt %d\n", IRQ_SOFTWARE);
+    if (lp->phy_dev)
+      phy_disconnect(lp->phy_dev);
+    lp->phy_dev = NULL;
+    
+    return retval;
+  }
+  
+  lowrisc_update_address(1, lp, ndev->dev_addr);
+  
+  /* We're ready to go */
+  netif_start_queue(ndev);
+  
+  return 0;
+}
+
+/**
+ * lowrisc_send - Transmit a frame
+ * @orig_skb:	Pointer to the socket buffer to be transmitted
+ * @dev:	Pointer to the network device
+ *
+ * This function checks if the Tx buffer of the Ether100MHz device is free to send
+ * data. If so, it fills the Tx buffer with data from socket buffer data,
+ * updates the stats and frees the socket buffer.
+ * Return:	0, always.
+ */
+static int lowrisc_send(struct sk_buff *new_skb, struct net_device *ndev)
+{
+	struct net_local *lp = netdev_priv(ndev);
+	unsigned int len = new_skb->len;
+        uint32_t *alloc = (uint32_t *)new_skb->data;
+        int i, rslt;
+
+	spin_lock(&lp->lock);
+        rslt = axi_read(lp, TPLR_OFFSET);
+        if (rslt & TPLR_BUSY_MASK)
+          printk("TX Busy Status = %x, len = %d, ignoring\n", rslt, len);
+        for (i = 0; i < (((len-1)|3)+1)/4; i++)
+          {
+            axi_write(lp, TXBUFF_OFFSET+(i<<2), alloc[i]);
+          }
+        axi_write(lp, TPLR_OFFSET,len);
+
+	spin_unlock(&lp->lock);
+
+	skb_tx_timestamp(new_skb);
+
+	ndev->stats.tx_bytes += len;
+	ndev->stats.tx_packets++;
+	dev_consume_skb_any(new_skb);
+
+	return 0;
+}
+
+s32 lowrisc_read_phy_reg(struct phy_device *phydev, u32 reg_addr, u16 * phy_data)
+{
+  u16 val = phy_read(phydev, reg_addr);
+  *phy_data = val;
+  return 0;
+}
+
+s32 lowrisc_write_phy_reg(struct phy_device *phydev, u32 reg_addr, u16 data)
+{
+  return phy_write(phydev, reg_addr, data);
+}
+
+static int lowrisc_mii_ioctl(struct net_device *netdev, struct ifreq *ifr, int cmd)
+{
+        struct net_local *lp = netdev_priv(netdev);
+	struct phy_device *phy = lp->phy_dev;
+        struct mii_ioctl_data *data = if_mii(ifr);
+        u16 mii_reg;
+
+        switch (cmd) {
+        case SIOCGMIIPHY:
+                data->phy_id = 1;
+                break;
+        case SIOCGMIIREG:
+                spin_lock(&lp->lock);
+                if (lowrisc_read_phy_reg(phy, data->reg_num & 0x1F,
+                                   &data->val_out)) {
+                        spin_unlock(&lp->lock);
+                        return -EIO;
+                }
+                spin_unlock(&lp->lock);
+                break;
+        case SIOCSMIIREG:
+                if (data->reg_num & ~(0x1F))
+                        return -EFAULT;
+                mii_reg = data->val_in;
+                spin_lock(&lp->lock);
+                if (lowrisc_write_phy_reg(phy, data->reg_num,
+                                        mii_reg)) {
+                        spin_unlock(&lp->lock);
+                        return -EIO;
+                }
+                spin_unlock(&lp->lock);
+                break;
+        default:
+                return -EOPNOTSUPP;
+        }
+        return 0;
+	}
+
+static struct net_device_ops lowrisc_netdev_ops = {
+	.ndo_open		= lowrisc_open,
+	.ndo_stop		= lowrisc_close,
+	.ndo_start_xmit		= lowrisc_send,
+	.ndo_set_mac_address	= lowrisc_set_mac_address,
+	.ndo_tx_timeout		= lowrisc_tx_timeout,
+	.ndo_do_ioctl           = lowrisc_mii_ioctl,
+};
+
+/**
+ * lowrisc_of_probe - Probe method for the Ether100MHz device.
  * @ofdev:	Pointer to OF device structure
  * @match:	Pointer to the structure used for matching a device
  *
- * This function probes for the EtherTAP device in the device tree.
+ * This function probes for the Ether100MHz device in the device tree.
  * It initializes the driver data structure and the hardware, sets the MAC
  * address and registers the network device.
- * It also registers a mii_bus for the EtherTAP device, if MDIO is included
+ * It also registers a mii_bus for the Ether100MHz device, if MDIO is included
  * in the device.
  *
- * Return:	0, if the driver is bound to the EtherTAP device, or
+ * Return:	0, if the driver is bound to the Ether100MHz device, or
  *		a negative error if there is failure.
  */
-static int tap_minion_probe(struct platform_device *ofdev)
+static int lowrisc_100MHz_probe(struct platform_device *ofdev)
 {
 	struct net_device *ndev = NULL;
 	struct net_local *lp = NULL;
@@ -812,10 +705,6 @@ static int tap_minion_probe(struct platform_device *ofdev)
 	int rc = 0;
         strcpy(mac_address, "\xe0\xe1\xe2\xe3\xe4\xe5");
         lowrisc_ethernet = platform_get_resource(ofdev, IORESOURCE_MEM, 0);
-        eth_base = devm_ioremap_resource(&ofdev->dev, lowrisc_ethernet);
-
-	printk("lowrisc-digilent-ethernet: Lowrisc ethernet platform (%llX-%llX) mapped to %p\n",
-               lowrisc_ethernet[0].start, lowrisc_ethernet[0].end, eth_base);
 
 	/* Create an ethernet device instance */
 	ndev = alloc_etherdev(sizeof(struct net_local));
@@ -827,21 +716,21 @@ static int tap_minion_probe(struct platform_device *ofdev)
 
 	lp = netdev_priv(ndev);
 	lp->ndev = ndev;
+        lp->ioaddr = devm_ioremap_resource(&ofdev->dev, lowrisc_ethernet);
 
-	spin_lock_init(&lp->reset_lock);
-	lp->next_tx_buf_to_use = 0x0;
-	lp->next_rx_buf_to_use = 0x0;
+	printk("lowrisc-digilent-ethernet: Lowrisc ethernet platform (%llX-%llX) mapped to %p\n",
+               lowrisc_ethernet[0].start, lowrisc_ethernet[0].end, lp->ioaddr);
+        
+	spin_lock_init(&lp->lock);
 
 	memcpy(ndev->dev_addr, mac_address, ETH_ALEN);
 
-	rc = request_irq(IRQ_SOFTWARE, lowrisc_ether_isr, IRQF_SHARED, "eth0", ndev);
-        
-	/* Set the MAC address in the EtherTAP device */
-	minion_update_address(lp, ndev->dev_addr);
+	/* Set the MAC address in the Ether100MHz device */
+	lowrisc_update_address(0, lp, ndev->dev_addr);
 
 	smsc_mii_init(ndev);
 
-	ndev->netdev_ops = &minion_netdev_ops;
+	ndev->netdev_ops = &lowrisc_netdev_ops;
 	ndev->flags &= ~IFF_MULTICAST;
 	ndev->watchdog_timeo = TX_TIMEOUT;
 
@@ -853,109 +742,44 @@ static int tap_minion_probe(struct platform_device *ofdev)
 		goto error;
 	}
 
-	dev_info(dev, "Minion EtherTAP registered\n");
-
-	tap_init_timer(ndev);
+	dev_info(dev, "Lowrisc Ether100MHz registered\n");
 	
 	return 0;
 
 error:
-	minion_remove_ndev(ndev);
+	lowrisc_remove_ndev(ndev);
 	return rc;
 }
 
-s32 minion_read_phy_reg(struct phy_device *phydev, u32 reg_addr, u16 * phy_data)
-{
-  u16 val = phy_read(phydev, reg_addr);
-  *phy_data = val;
-  return 0;
-}
-
-s32 minion_write_phy_reg(struct phy_device *phydev, u32 reg_addr, u16 data)
-{
-  return phy_write(phydev, reg_addr, data);
-}
-
-static int minion_mii_ioctl(struct net_device *netdev, struct ifreq *ifr, int cmd)
-{
-        struct net_local *lp = netdev_priv(netdev);
-	struct phy_device *phy = lp->phy_dev;
-        struct mii_ioctl_data *data = if_mii(ifr);
-        u16 mii_reg;
-        unsigned long flags;
-
-        switch (cmd) {
-        case SIOCGMIIPHY:
-                data->phy_id = 1;
-                break;
-        case SIOCGMIIREG:
-                spin_lock_irqsave(&lp->stats_lock, flags);
-                if (minion_read_phy_reg(phy, data->reg_num & 0x1F,
-                                   &data->val_out)) {
-                        spin_unlock_irqrestore(&lp->stats_lock, flags);
-                        return -EIO;
-                }
-                spin_unlock_irqrestore(&lp->stats_lock, flags);
-                break;
-        case SIOCSMIIREG:
-                if (data->reg_num & ~(0x1F))
-                        return -EFAULT;
-                mii_reg = data->val_in;
-                spin_lock_irqsave(&lp->stats_lock, flags);
-                if (minion_write_phy_reg(phy, data->reg_num,
-                                        mii_reg)) {
-                        spin_unlock_irqrestore(&lp->stats_lock, flags);
-                        return -EIO;
-                }
-                spin_unlock_irqrestore(&lp->stats_lock, flags);
-                break;
-        default:
-                return -EOPNOTSUPP;
-        }
-        return 0;
-	}
-
-static struct net_device_ops minion_netdev_ops = {
-	.ndo_open		= minion_open,
-	.ndo_stop		= minion_close,
-	.ndo_start_xmit		= minion_send,
-	.ndo_set_mac_address	= minion_set_mac_address,
-	.ndo_tx_timeout		= minion_tx_timeout,
-	.ndo_do_ioctl           = minion_mii_ioctl,
-#ifdef CONFIG_NET_POLL_CONTROLLER
-	.ndo_poll_controller = minion_poll_controller,
-#endif
-};
-
 /* Match table for OF platform binding */
-static const struct of_device_id tap_minion_of_match[] = {
-	{ .compatible = "riscv,minion" },
+static const struct of_device_id lowrisc_100MHz_of_match[] = {
+	{ .compatible = "riscv,lowrisc" },
 	{ /* end of list */ },
 };
-MODULE_DEVICE_TABLE(of, tap_minion_of_match);
+MODULE_DEVICE_TABLE(of, lowrisc_100MHz_of_match);
 
-void tap_minion_free(struct platform_device *of_dev)
+void lowrisc_100MHz_free(struct platform_device *of_dev)
 {
         struct resource *iomem = platform_get_resource(of_dev, IORESOURCE_MEM, 0);
         release_mem_region(iomem->start, resource_size(iomem));
 }
 
-int tap_minion_unregister(struct platform_device *of_dev)
+int lowrisc_100MHz_unregister(struct platform_device *of_dev)
 {
-        tap_minion_free(of_dev);
+        lowrisc_100MHz_free(of_dev);
         return 0;
 }
 
-static struct platform_driver tap_minion_driver = {
+static struct platform_driver lowrisc_100MHz_driver = {
 	.driver = {
 		.name = "lowrisc_digilent_ethernet",
-		.of_match_table = tap_minion_of_match,
+		.of_match_table = lowrisc_100MHz_of_match,
 	},
-	.probe = tap_minion_probe,
-	.remove = tap_minion_unregister,
+	.probe = lowrisc_100MHz_probe,
+	.remove = lowrisc_100MHz_unregister,
 };
 
-module_platform_driver(tap_minion_driver);
+module_platform_driver(lowrisc_100MHz_driver);
 
 struct lan8720_priv {
 	int	chip_id;
@@ -964,5 +788,5 @@ struct lan8720_priv {
 };
 
 MODULE_AUTHOR("Jonathan Kimmitt");
-MODULE_DESCRIPTION("Minion Ethernet TAP driver");
+MODULE_DESCRIPTION("Lowrisc Ethernet 100MHz driver");
 MODULE_LICENSE("GPL");
