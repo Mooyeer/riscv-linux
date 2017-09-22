@@ -129,7 +129,7 @@ static void lowrisc_update_address(int irq_enable, struct net_local *lp, u8 *add
   memcpy (&macaddr_lo, address_ptr+2, sizeof(uint32_t));
   memcpy (&macaddr_hi, address_ptr+0, sizeof(uint16_t));
   axi_write(lp, MACLO_OFFSET, htonl(macaddr_lo));
-  axi_write(lp, MACHI_OFFSET, /* irqflags| */ flags|htons(macaddr_hi));
+  axi_write(lp, MACHI_OFFSET, irqflags|flags|htons(macaddr_hi));
 }
 
 /**
