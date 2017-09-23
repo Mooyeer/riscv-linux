@@ -154,6 +154,10 @@ ENTRY(handle_exception)
 1:
 	tail do_trap_unknown
 
+ENTRY(clear_sip)
+	csrc sip, a0
+	ret
+
 handle_syscall:
 	/* Advance SEPC to avoid executing the original
 	   scall instruction on sret */

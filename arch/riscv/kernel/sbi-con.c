@@ -8,22 +8,28 @@
 #include <linux/interrupt.h>
 #include <linux/platform_device.h>
 #include <asm/config-string.h>
-#include <asm/sbi.h>
 
 static DEFINE_SPINLOCK(xuart_tty_port_lock);
 static struct tty_port xuart_tty_port;
 static struct tty_driver *xuart_tty_driver;
 static volatile uint32_t *uart_base_ptr;
+static u64 ubase_phys;
 
-static void xuart_putchar(int data)
+void xuart_putchar(int data)
 {
-#if 1
-  sbi_console_putchar(data);
-#else  
+  if (!uart_base_ptr)
+    {
+      // Find config string driver
+      struct device *csdev = bus_find_device_by_name(&platform_bus_type, NULL, "config-string");
+      struct platform_device *pcsdev = to_platform_device(csdev);
+      ubase_phys = config_string_u64(pcsdev, "uart.addr");
+      uart_base_ptr = 0x400 + (volatile uint32_t *)ioremap(ubase_phys, 8192);
+    }
   // wait until THR empty
-  while(! (*(uart_base_ptr + UART_LSR) & UART_LSR_TEMT)); /* should that be UART_LSR_THRE ?? */
+  //  while(! (*(uart_base_ptr + UART_LSR) & UART_LSR_TEMT));
+  while(! (*(uart_base_ptr + UART_LSR) & UART_LSR_THRE))
+    ;
   *(uart_base_ptr + UART_TX) = data;
-#endif  
 }
 
 // enable uart read IRQ
@@ -36,51 +42,21 @@ void xuart_disable_read_irq(void) {
   *(uart_base_ptr + UART_IER) &= ~UART_IER_RDI;
 }
 
-enum {inc=HZ/10}; // 1Hz
-
-static struct timer_list xuart_timer;
-
 static irqreturn_t xuart_console_isr(int irq, void *dev_id)
 {
-        if (*(uart_base_ptr + UART_LSR) & UART_LSR_DR)
-          {
-            xuart_disable_read_irq();
-            do {
-              int ch = *(uart_base_ptr + UART_RX);            
-              //              *(uart_base_ptr + UART_TX) = ch;
-              spin_lock(&xuart_tty_port_lock);
-              tty_insert_flip_char(&xuart_tty_port, ch, TTY_NORMAL);
-              tty_flip_buffer_push(&xuart_tty_port);
-              spin_unlock(&xuart_tty_port_lock);
-            } while (*(uart_base_ptr + UART_LSR) & UART_LSR_DR);
-            xuart_enable_read_irq();
-            
-            return IRQ_HANDLED;
-          }
-        else
-          {
-            return IRQ_NONE;
-          }
-}
-
-/* Timer callback */
-void xuart_timer_callback(unsigned long arg)
-{
-  void *dev_id = (void *)arg;
-  //  printk("xuart_timer_callback();\n");
-  //  xuart_console_isr(-1, dev_id);
-  mod_timer(&xuart_timer, jiffies + inc); /* restarting timer */
-}
-
-static void xuart_init_timer(void *dev)
-{
-  init_timer(&xuart_timer);
-  xuart_timer.function = xuart_timer_callback;
-  xuart_timer.data = (unsigned long)dev;
-  xuart_timer.expires = jiffies + inc;
-  add_timer(&xuart_timer); /* Starting the timer */
-  
-  printk(KERN_INFO "xuart_timer is started\n");
+  irqreturn_t rc = IRQ_NONE;
+  if (*(uart_base_ptr + UART_LSR) & UART_LSR_DR)
+    {
+      int ch = *(uart_base_ptr + UART_RX);            
+      //      *(uart_base_ptr + UART_TX) = ch;
+      spin_lock(&xuart_tty_port_lock);
+      tty_insert_flip_char(&xuart_tty_port, ch, TTY_NORMAL);
+      tty_flip_buffer_push(&xuart_tty_port);
+      spin_unlock(&xuart_tty_port_lock);      
+      rc = IRQ_HANDLED;
+    }
+  xuart_enable_read_irq();
+  return rc;
 }
 
 static int xuart_tty_open(struct tty_struct *tty, struct file *filp)
@@ -142,13 +118,10 @@ static struct console xuart_console = {
 static int __init xuart_console_init(void)
 {
 	int ret;
-	// Find config string driver
-	struct device *csdev = bus_find_device_by_name(&platform_bus_type, NULL, "config-string");
-	struct platform_device *pcsdev = to_platform_device(csdev);
-        u64 ubase = config_string_u64(pcsdev, "uart.addr");
-        uart_base_ptr = 0x400 + (volatile uint32_t *)ioremap(ubase, 8192);
-        printk("xuart_console address %llx, remapped to %p\n", ubase, uart_base_ptr);
-        
+	xuart_putchar('\n');
+	printk("xuart_console address %llx, remapped to %p\n",
+	       ubase_phys, uart_base_ptr);
+	
 	register_console(&xuart_console);
 
 	xuart_tty_driver = tty_alloc_driver(1,
@@ -178,13 +151,7 @@ static int __init xuart_console_init(void)
 	if (unlikely(ret))
 		goto out_tty_put;
 
-#if 1
-	/* Trigger future interrupts */
-        xuart_enable_read_irq();
-#else
-        xuart_disable_read_irq();
-#endif        
-        xuart_init_timer(NULL);
+	xuart_console_isr(IRQ_SOFTWARE, NULL);
 
 	return ret;
 

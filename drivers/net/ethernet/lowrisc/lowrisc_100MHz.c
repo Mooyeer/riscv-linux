@@ -96,16 +96,28 @@ struct net_local {
   
 };
 
-static void axi_write(struct net_local *lp, size_t addr, int data)
+static void inline eth_write(struct net_local *lp, size_t addr, int data)
 {
   volatile unsigned int *eth_base = (volatile unsigned int *)(lp->ioaddr);
   eth_base[addr >> 2] = data;
 }
 
-static int axi_read(struct net_local *lp, size_t addr)
+static volatile inline int eth_read(struct net_local *lp, size_t addr)
 {
   volatile unsigned int *eth_base = (volatile unsigned int *)(lp->ioaddr);
   return eth_base[addr >> 2];
+}
+
+static void inline eth_enable_irq(struct net_local *lp)
+{
+  volatile unsigned int *eth_base = (volatile unsigned int *)(lp->ioaddr);
+  eth_base[MACHI_OFFSET >> 2] |= MACHI_IRQ_EN;
+}
+
+static void inline eth_disable_irq(struct net_local *lp)
+{
+  volatile unsigned int *eth_base = (volatile unsigned int *)(lp->ioaddr);
+  eth_base[MACHI_OFFSET >> 2] &= ~MACHI_IRQ_EN;
 }
 
 /**
@@ -120,16 +132,14 @@ static int axi_read(struct net_local *lp, size_t addr)
  * buffers (if configured).
  */
 
-static void lowrisc_update_address(int irq_enable, struct net_local *lp, u8 *address_ptr)
+static void lowrisc_update_address(struct net_local *lp, u8 *address_ptr)
 {
   uint32_t macaddr_lo, macaddr_hi;
-  uint32_t flags, irqflags = (irq_enable ? MACHI_IRQ_EN : 0);
-  printk("%s interrupts\n", irqflags ? "Enable" : "Disable");
-  flags = MACHI_ALLPACKETS_MASK|MACHI_DATA_DLY_MASK|MACHI_COOKED_MASK;
+  uint32_t flags = MACHI_ALLPACKETS_MASK|MACHI_DATA_DLY_MASK|MACHI_COOKED_MASK;
   memcpy (&macaddr_lo, address_ptr+2, sizeof(uint32_t));
   memcpy (&macaddr_hi, address_ptr+0, sizeof(uint16_t));
-  axi_write(lp, MACLO_OFFSET, htonl(macaddr_lo));
-  axi_write(lp, MACHI_OFFSET, irqflags|flags|htons(macaddr_hi));
+  eth_write(lp, MACLO_OFFSET, htonl(macaddr_lo));
+  eth_write(lp, MACHI_OFFSET, flags|htons(macaddr_hi));
 }
 
 /**
@@ -147,9 +157,8 @@ static int lowrisc_set_mac_address(struct net_device *ndev, void *address)
 {
 	struct net_local *lp = netdev_priv(ndev);
 	struct sockaddr *addr = address;
-	int irq_enable = axi_read(lp, MACHI_OFFSET) & MACHI_IRQ_EN;
 	memcpy(ndev->dev_addr, addr->sa_data, ndev->addr_len);
-	lowrisc_update_address(irq_enable, lp, ndev->dev_addr);
+	lowrisc_update_address(lp, ndev->dev_addr);
 	return 0;
 }
 
@@ -195,7 +204,7 @@ static int lowrisc_close(struct net_device *ndev)
 	struct net_local *lp = netdev_priv(ndev);
 
 	netif_stop_queue(ndev);
-	lowrisc_update_address(0, lp, ndev->dev_addr);
+	eth_disable_irq(lp);
 	free_irq(IRQ_SOFTWARE, ndev);
         printk("Close device, free interrupt\n");
         
@@ -322,13 +331,13 @@ static void mdio_dir(struct mdiobb_ctrl *ctrl, int dir)
   else
     last_gpio &= ~ (1 << 2);
     
-  axi_write(lp, MDIOCTRL_OFFSET, last_gpio);
+  eth_write(lp, MDIOCTRL_OFFSET, last_gpio);
 }
 
 static int mdio_get(struct mdiobb_ctrl *ctrl)
 {
   struct net_local *lp = (struct net_local *)ctrl; /* struct mdiobb_ctrl must be first in net_local for bitbang driver to work */
-  uint32_t rslt = axi_read(lp, MDIOCTRL_OFFSET);
+  uint32_t rslt = eth_read(lp, MDIOCTRL_OFFSET);
   return rslt >> 3;
 }
 
@@ -340,7 +349,7 @@ static void mdio_set(struct mdiobb_ctrl *ctrl, int what)
   else
     last_gpio &= ~ (1 << 1);
     
-  axi_write(lp, MDIOCTRL_OFFSET, last_gpio);
+  eth_write(lp, MDIOCTRL_OFFSET, last_gpio);
 }
 
 static void mdc_set(struct mdiobb_ctrl *ctrl, int what)
@@ -351,7 +360,7 @@ static void mdc_set(struct mdiobb_ctrl *ctrl, int what)
   else
     last_gpio &= ~ (1 << 0);
     
-  axi_write(lp, MDIOCTRL_OFFSET, last_gpio);
+  eth_write(lp, MDIOCTRL_OFFSET, last_gpio);
 }
 
 /* reset callback */
@@ -474,13 +483,13 @@ irqreturn_t lowrisc_ether_isr(int irq, void *dev_id)
   struct net_local *lp = netdev_priv(ndev);
   static struct sk_buff *skb;
   unsigned int align;
-  int rxstatus, i, fcs, rplr, len;
+  int i, fcs, rplr, len;
   spin_lock(&(lp->lock));
-  rxstatus = axi_read(lp, RSR_OFFSET);
-    
   /* Check if there is Rx Data available */
-  if (rxstatus & RSR_RECV_DONE_MASK)
+  if (eth_read(lp, RSR_OFFSET) & RSR_RECV_DONE_MASK)
     {
+      /* acknowledge, even if an error occurs, to reset irq */
+      eth_write(lp, RSR_OFFSET, 0);
       rc = IRQ_HANDLED;
       skb = netdev_alloc_skb(ndev, ETH_FRAME_LEN + ETH_FCS_LEN + ALIGNMENT);
       if (!skb)
@@ -502,8 +511,8 @@ irqreturn_t lowrisc_ether_isr(int irq, void *dev_id)
           
           skb_reserve(skb, 2);
 
-          fcs = axi_read(lp, RFCS_OFFSET);
-          rplr = axi_read(lp, RPLR_OFFSET);
+          fcs = eth_read(lp, RFCS_OFFSET);
+          rplr = eth_read(lp, RPLR_OFFSET);
           len = (rplr & RPLR_LENGTH_MASK) >> 16;
           if ((len >= 14) && (fcs == 0xc704dd7b))
             {
@@ -514,7 +523,7 @@ irqreturn_t lowrisc_ether_isr(int irq, void *dev_id)
               alloc = (uint32_t *)(skb->data);
               for (i = 0; i < rnd/4; i++)
                 {
-                  alloc[i] = axi_read(lp, RXBUFF_OFFSET+(i<<2));
+                  alloc[i] = eth_read(lp, RXBUFF_OFFSET+(i<<2));
                 }
               skb_put(skb, len);	/* Tell the skb how much data we got */
               
@@ -532,10 +541,10 @@ irqreturn_t lowrisc_ether_isr(int irq, void *dev_id)
               ndev->stats.rx_errors++;
               dev_kfree_skb_irq(skb);
             }
-          axi_write(lp, RSR_OFFSET, 0); /* acknowledge, even if an error occurs, to reset irq */
         }
     }
   spin_unlock(&(lp->lock));
+  eth_enable_irq(lp);
   
   return rc;
 }
@@ -554,7 +563,7 @@ static int lowrisc_open(struct net_device *ndev)
   struct net_local *lp = netdev_priv(ndev);
 
   /* Set the MAC address each time opened */
-  lowrisc_update_address(0, lp, ndev->dev_addr);
+  lowrisc_update_address(lp, ndev->dev_addr);
   
   if (lp->phy_dev) {
     /* Ether100MHz doesn't support giga-bit speeds */
@@ -576,11 +585,13 @@ static int lowrisc_open(struct net_device *ndev)
     return retval;
   }
   
-  lowrisc_update_address(1, lp, ndev->dev_addr);
-  
+  lowrisc_update_address(lp, ndev->dev_addr);
+
   /* We're ready to go */
   netif_start_queue(ndev);
-  
+
+  /* first call to handler enables the irq */
+  lowrisc_ether_isr(IRQ_SOFTWARE, ndev);
   return 0;
 }
 
@@ -602,14 +613,14 @@ static int lowrisc_send(struct sk_buff *new_skb, struct net_device *ndev)
         int i, rslt;
 
 	spin_lock(&lp->lock);
-        rslt = axi_read(lp, TPLR_OFFSET);
+        rslt = eth_read(lp, TPLR_OFFSET);
         if (rslt & TPLR_BUSY_MASK)
           printk("TX Busy Status = %x, len = %d, ignoring\n", rslt, len);
         for (i = 0; i < (((len-1)|3)+1)/4; i++)
           {
-            axi_write(lp, TXBUFF_OFFSET+(i<<2), alloc[i]);
+            eth_write(lp, TXBUFF_OFFSET+(i<<2), alloc[i]);
           }
-        axi_write(lp, TPLR_OFFSET,len);
+        eth_write(lp, TPLR_OFFSET,len);
 
 	spin_unlock(&lp->lock);
 
@@ -726,7 +737,7 @@ static int lowrisc_100MHz_probe(struct platform_device *ofdev)
 	memcpy(ndev->dev_addr, mac_address, ETH_ALEN);
 
 	/* Set the MAC address in the Ether100MHz device */
-	lowrisc_update_address(0, lp, ndev->dev_addr);
+	lowrisc_update_address(lp, ndev->dev_addr);
 
 	smsc_mii_init(ndev);
 
