@@ -134,6 +134,10 @@ ENTRY(handle_exception)
 	/* Handle interrupts */
 	slli a0, s4, 1
 	srli a0, a0, 1
+	addi a1, a0, -1
+	bnez a1, 2f
+	csrc sip, 2
+2:	
 	move a1, sp /* pt_regs */
 	tail do_IRQ
 1:
