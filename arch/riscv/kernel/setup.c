@@ -178,9 +178,77 @@ static struct platform_device xethernet_device = {
 	.resource = lowrisc_ethernet,
 };
 
+static struct resource lowrisc_hid[] = {
+	[0] = {
+		.start = 0,
+		.end   = 0xFFF,
+		.flags = IORESOURCE_MEM,
+	},
+	[1] = {
+		.start = 0,
+		.end   = 0x7FFF,
+		.flags = IORESOURCE_MEM,
+	},
+};
+
+static struct platform_device hid_device = {
+	.name = "lowrisc_hid",
+	.id = 0, /* Bus number */
+	.num_resources = ARRAY_SIZE(lowrisc_hid),
+	.resource = lowrisc_hid,
+};
+
+static struct resource lowrisc_sd[] = {
+	[0] = {
+		.start = 0,
+		.end   = 0xFFF,
+		.flags = IORESOURCE_MEM,
+	},
+	[1] = {
+		.start = 0,
+		.end   = 0xFFF,
+		.flags = IORESOURCE_MEM,
+	},
+	[2] = {
+		.start = 0,
+		.end   = 0xFFF,
+		.flags = IORESOURCE_MEM,
+	},
+};
+
+static struct platform_device minion_mmc_device = {
+		.name = "sdhci-minion",
+		.id = -1,
+		.num_resources = ARRAY_SIZE(lowrisc_sd),
+		.resource = lowrisc_sd,
+	};
+
 static int __init lowrisc_setup_devinit(void)
 {
 	int ret;
+	// Find config string driver
+	struct device *csdev = bus_find_device_by_name(&platform_bus_type, NULL, "config-string");
+	struct platform_device *pcsdev = to_platform_device(csdev);
+	u64 hid_addr = config_string_u64(pcsdev, "hid.addr");
+	u64 keyb_addr = hid_addr + 0x00000000;
+	u64 vid_addr = hid_addr + 0x00008000;
+        u64 sd_addr = hid_addr + 0x00010000;
+	u64 sdtx_addr = hid_addr + 0x00014000;
+	u64 sdrx_addr = hid_addr + 0x00018000;
+#if 0
+	lowrisc_hid[0].start += keyb_addr;
+	lowrisc_hid[0].end += keyb_addr;
+	lowrisc_hid[1].start += vid_addr;
+	lowrisc_hid[1].end += vid_addr;
+        ret = platform_device_register(&hid_device);
+#endif
+	lowrisc_sd[0].start += sd_addr;
+	lowrisc_sd[0].end += sd_addr;
+	lowrisc_sd[1].start += sdtx_addr;
+	lowrisc_sd[1].end += sdtx_addr;
+	lowrisc_sd[2].start += sdrx_addr;
+	lowrisc_sd[2].end += sdrx_addr;
+        platform_device_register(&minion_mmc_device);
 
 #if IS_ENABLED(CONFIG_SPI_XILINX)
         {

@@ -18,68 +18,25 @@ static DEFINE_SPINLOCK(xuart_tty_port_lock);
 static DEFINE_SPINLOCK(sbi_timer_lock);
 static struct tty_port xuart_tty_port;
 static struct tty_driver *xuart_tty_driver;
-static volatile uint32_t *uart_base, *keyb_base, *vid_base;
-static u64 uart_addr, keyb_addr, vid_addr;
+static volatile uint32_t *keyb_base, *vid_base;
+static u64 keyb_addr, vid_addr;
 
-void xuart_putchar(int data)
-{
-  if (!uart_base)
-    {
-      // Find config string driver
-      struct device *csdev = bus_find_device_by_name(&platform_bus_type, NULL, "config-string");
-      struct platform_device *pcsdev = to_platform_device(csdev);
-      uart_addr = config_string_u64(pcsdev, "uart.addr");
-      uart_base = 0x400 + (volatile uint32_t *)ioremap(uart_addr, 8192);
-    }
-  // wait until THR empty
-  //  while(! (*(uart_base + UART_LSR) & UART_LSR_TEMT));
-  while(! (*(uart_base + UART_LSR) & UART_LSR_THRE))
-    ;
-  *(uart_base + UART_TX) = data;
-}
-
-// enable uart read IRQ
-void xuart_enable_read_irq(void) {
-  *(uart_base + UART_IER) |= UART_IER_RDI;
-}
-
-// disable uart read IRQ
-void xuart_disable_read_irq(void) {
-  *(uart_base + UART_IER) &= ~UART_IER_RDI;
-}
-
-static irqreturn_t xuart_console_isr(int irq, void *dev_id)
-{
-  irqreturn_t rc = IRQ_NONE;
-  if (*(uart_base + UART_LSR) & UART_LSR_DR)
-    {
-      int ch = *(uart_base + UART_RX);            
-      //      *(uart_base + UART_TX) = ch;
-      spin_lock(&xuart_tty_port_lock);
-      tty_insert_flip_char(&xuart_tty_port, ch, TTY_NORMAL);
-      tty_flip_buffer_push(&xuart_tty_port);
-      spin_unlock(&xuart_tty_port_lock);      
-      rc = IRQ_HANDLED;
-    }
-  xuart_enable_read_irq();
-  return rc;
-}
- 
 /* Timer callback */
 void timer_callback(unsigned long arg)
 {
-  uint32_t key = keyb_base[0];
-  while ((1<<28) & ~key) /* FIFO not empty */
+  uint32_t key = *keyb_base;
+  while ((1<<16) & ~key) /* FIFO not empty */
     {
       int ch;
-      keyb_base[1] = 0;
-      ch = keyb_base[1] >> 8; /* strip off the scan code (default ascii code is UK) */
+      *keyb_base = 0;
+      ch = *keyb_base >> 8; /* strip off the scan code (default ascii code is UK) */
       spin_lock(&xuart_tty_port_lock);
       tty_insert_flip_char(&xuart_tty_port, ch, TTY_NORMAL);
       tty_flip_buffer_push(&xuart_tty_port);
       spin_unlock(&xuart_tty_port_lock);
-      key = keyb_base[0];
+      key = *keyb_base;
     }
+  //  printk(KERN_INFO "keyb_timer callback\n");
   mod_timer(&keyb_timer, jiffies + 6); /* restarting timer */
 }
  
@@ -95,16 +52,6 @@ static void keyb_init_timer(void)
     printk(KERN_INFO "keyb_timer is started\n");
 }
 
-volatile uint32_t * const video_base = (volatile uint32_t*)(10<<20);
-
-static char old_video[4096];
-
-static void video_write(int addr, unsigned char ch)
-{
-  old_video[addr&4095] = ch;
-  vid_base[addr] = ch;
-}
-
 static void minion_console_putchar(unsigned char ch)
 {
   static int addr_int = 0;
@@ -113,18 +60,18 @@ static void minion_console_putchar(unsigned char ch)
     case 8: case 127: if (addr_int & 127) --addr_int; break;
     case 13: addr_int = addr_int & -128; break;
     case 10: addr_int = (addr_int|127)+1; break;
-    default: video_write(addr_int++, ch);
+    default: vid_base[addr_int++] = ch;
     }
   if (addr_int >= 4096-128)
     {
       // this is where we scroll
-      memcpy(old_video, old_video+128, 4096-128);
-      memset(old_video+4096-128, ' ', 128);
       for (addr_int = 0; addr_int < 4096; addr_int++)
-	vid_base[addr_int] = old_video[addr_int];
+        if (addr_int < 4096-128)
+          vid_base[addr_int] = vid_base[addr_int+128];
+        else
+          vid_base[addr_int] = ' ';
       addr_int = 4096-256;
     }
-  xuart_putchar(ch);
 }
 
 static int xuart_tty_open(struct tty_struct *tty, struct file *filp)
@@ -196,8 +143,7 @@ static int __init xuart_console_init(void)
 	keyb_base = (volatile uint32_t *)ioremap(keyb_addr, 0x1000);
 	vid_base = (volatile uint32_t *)ioremap(vid_addr, 0x8000);
 	
-	xuart_putchar('\n');
-	printk("xuart_console address %llx, remapped to %p\n", uart_addr, uart_base);
+	printk("hid_console address %llx, remapped to %p\n", vid_addr, vid_base);
 	
 	register_console(&xuart_console);
 
@@ -222,14 +168,6 @@ static int __init xuart_console_init(void)
 	if (unlikely(ret))
 		goto out_tty_put;
       
-	ret = request_irq(IRQ_SOFTWARE, xuart_console_isr, IRQF_SHARED,
-	                  xuart_tty_driver->driver_name, xuart_console_isr);
-
-	if (unlikely(ret))
-		goto out_tty_put;
-
-	xuart_console_isr(IRQ_SOFTWARE, NULL);
-
 	/* Init the spinlock */
 	spin_lock_init(&sbi_timer_lock);
  
@@ -253,25 +191,3 @@ module_exit(xuart_console_exit);
 
 MODULE_DESCRIPTION("RISC-V SBI console driver");
 MODULE_LICENSE("GPL");
-
-#ifdef CONFIG_EARLY_PRINTK
-
-static struct console early_console_dev __initdata = {
-	.name	= "early",
-	.write	= xuart_console_write,
-	.flags	= CON_PRINTBUFFER | CON_BOOT,
-	.index	= -1
-};
-
-static int __init setup_early_printk(char *str)
-{
-	if (early_console == NULL) {
-		early_console = &early_console_dev;
-		register_console(early_console);
-	}
-	return 0;
-}
-
-early_param("earlyprintk", setup_early_printk);
-
-#endif

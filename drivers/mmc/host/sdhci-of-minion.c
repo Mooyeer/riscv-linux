@@ -248,7 +248,8 @@ uint32_t rx_read_fifo(void)
 
 void write_led(uint32_t data)
 {
-  sd_base[15] = data;
+  if (sd_base)
+    sd_base[15] = data;
 }
 
 uint32_t sd_resp(int sel)
@@ -1000,7 +1001,20 @@ static const struct sdhci_pltfm_data sdhci_minion_pdata = {
 
 static int sdhci_minion_probe(struct platform_device *pdev)
 {
-  return sdhci_pltfm_register(pdev, &sdhci_minion_pdata, 0);
+  int i;
+  for (i = 0; i < pdev->num_resources; i++)
+   {
+     struct resource *res = platform_get_resource(pdev, IORESOURCE_MEM, i);
+     void __iomem *base = devm_ioremap_resource(&pdev->dev, res);
+     printk("sdhci-minion: resource %d, address %llx, remapped to %p\n", i, res->start, base);
+     switch(i)
+       {
+       case 0: sd_base = base; break;
+       case 1: sdtx_base = base; break;
+       case 2: sdrx_base = base; break;
+       }
+   }
+ return sdhci_pltfm_register(pdev, &sdhci_minion_pdata, 0);
 }
 
 static const struct of_device_id sdhci_minion_of_match[] = {
@@ -1020,63 +1034,6 @@ static struct platform_driver sdhci_minion_driver = {
 };
 
 module_platform_driver(sdhci_minion_driver);
-
-static struct resource lowrisc_sd[] = {
-	[0] = {
-		.start = 0,
-		.end   = 0xFFF,
-		.flags = IORESOURCE_MEM,
-	},
-	[1] = {
-		.start = 0,
-		.end   = 0xFFF,
-		.flags = IORESOURCE_MEM,
-	},
-	[2] = {
-		.start = 0,
-		.end   = 0xFFF,
-		.flags = IORESOURCE_MEM,
-	},
-};
-
-static struct platform_device minion_mmc_device = {
-		.name = "sdhci-minion",
-		.id = -1,
-		.num_resources = ARRAY_SIZE(lowrisc_sd),
-		.resource = lowrisc_sd,
-	};
-
-static int __init sdhci_minion_drv_init(void)
-{
-	// Find config string driver
-	struct device *csdev = bus_find_device_by_name(&platform_bus_type, NULL, "config-string");
-	struct platform_device *pcsdev = to_platform_device(csdev);
-	u64 hid_addr = config_string_u64(pcsdev, "hid.addr");
-	sd_addr = hid_addr + 0x00010000;
-	sdtx_addr = hid_addr + 0x00014000;
-	sdrx_addr = hid_addr + 0x00018000;
-	lowrisc_sd[0].start += sd_addr;
-	lowrisc_sd[0].end += sd_addr;
-	lowrisc_sd[1].start += sdtx_addr;
-	lowrisc_sd[1].end += sdtx_addr;
-	lowrisc_sd[2].start += sdrx_addr;
-	lowrisc_sd[2].end += sdrx_addr;
-	sd_base = (volatile uint32_t *)ioremap(sd_addr, 0x1000);
-	sdtx_base = (volatile uint32_t *)ioremap(sdtx_addr, 0x1000);
-	sdrx_base = (volatile uint32_t *)ioremap(sdrx_addr, 0x1000);
-	printk("sdhci-minion: address %llx, remapped to %p\n", sd_addr, sd_base);
-        platform_device_register(&minion_mmc_device);
-	return 0;
-}
-
-module_init(sdhci_minion_drv_init);
-
-static void __exit sdhci_minion_drv_exit(void)
-{
-
-}
-
-module_exit(sdhci_minion_drv_exit);
 
 MODULE_DESCRIPTION("LowRISC Minion SDHCI OF driver");
 MODULE_AUTHOR("The LowRISC Linux Team, Jonathan Kimmitt");
