@@ -18,9 +18,8 @@ static DEFINE_SPINLOCK(xuart_tty_port_lock);
 static DEFINE_SPINLOCK(sbi_timer_lock);
 static struct tty_port xuart_tty_port;
 static struct tty_driver *xuart_tty_driver;
-static volatile uint32_t *uart_base, *keyb_base, *vid_base, *sdtx_base, *sdrx_base;
-static u64 uart_addr, hid_addr, keyb_addr, vid_addr, sd_addr, sdtx_addr, sdrx_addr;
-volatile uint32_t *sd_base;
+static volatile uint32_t *uart_base, *keyb_base, *vid_base;
+static u64 uart_addr, keyb_addr, vid_addr;
 
 void xuart_putchar(int data)
 {
@@ -64,26 +63,6 @@ static irqreturn_t xuart_console_isr(int irq, void *dev_id)
     }
   xuart_enable_read_irq();
   return rc;
-}
-
-void tx_write_fifo(uint32_t data)
-{
-  sdtx_base[0] = data;
-}
-
-void rx_write_fifo(uint32_t data)
-{
-  sdrx_base[0] = data;
-}
-
-uint32_t rx_read_fifo(void)
-{
-  return sdrx_base[0];
-}
-
-void write_led(uint32_t data)
-{
-  sd_base[15] = data;
 }
  
 /* Timer callback */
@@ -210,18 +189,12 @@ static int __init xuart_console_init(void)
 	// Find config string driver
 	struct device *csdev = bus_find_device_by_name(&platform_bus_type, NULL, "config-string");
 	struct platform_device *pcsdev = to_platform_device(csdev);
-	hid_addr = config_string_u64(pcsdev, "hid.addr");
+	u64 hid_addr = config_string_u64(pcsdev, "hid.addr");
 	keyb_addr = hid_addr + 0x00000000;
 	vid_addr = hid_addr + 0x00008000;
-	sd_addr = hid_addr + 0x00010000;
-	sdtx_addr = hid_addr + 0x00014000;
-	sdrx_addr = hid_addr + 0x00018000;
 	
 	keyb_base = (volatile uint32_t *)ioremap(keyb_addr, 0x1000);
 	vid_base = (volatile uint32_t *)ioremap(vid_addr, 0x8000);
-	sd_base = (volatile uint32_t *)ioremap(sd_addr, 0x1000);
-	sdtx_base = (volatile uint32_t *)ioremap(sdtx_addr, 0x8000);
-	sdrx_base = (volatile uint32_t *)ioremap(sdrx_addr, 0x8000);
 	
 	xuart_putchar('\n');
 	printk("xuart_console address %llx, remapped to %p\n", uart_addr, uart_base);

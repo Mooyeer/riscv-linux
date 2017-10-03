@@ -30,6 +30,9 @@
 #include <linux/module.h>
 #include <linux/mmc/host.h>
 #include <linux/mmc/mmc.h>
+#include <linux/platform_device.h>
+#include <asm/config-string.h>
+
 #include "sdhci-pltfm.h"
 //#include "sdhci-minion-hash-md5.h"
 #include <stdarg.h>
@@ -225,9 +228,28 @@ void sdhci_reset(struct sdhci_host *host, uint8_t mask);
 void minion_dispatch(const char *ucmd);
 
 /* HID peripheral address space pointer */
-extern volatile uint32_t *sd_base;
+static u64 sd_addr, sdtx_addr, sdrx_addr;
+static volatile uint32_t *sd_base, *sdtx_base, *sdrx_base;
 
-void tx_write_fifo(uint32_t data);
+void tx_write_fifo(uint32_t data)
+{
+  sdtx_base[0] = data;
+}
+
+void rx_write_fifo(uint32_t data)
+{
+  sdrx_base[0] = data;
+}
+
+uint32_t rx_read_fifo(void)
+{
+  return sdrx_base[0];
+}
+
+void write_led(uint32_t data)
+{
+  sd_base[15] = data;
+}
 
 uint32_t sd_resp(int sel)
 {
@@ -999,26 +1021,50 @@ static struct platform_driver sdhci_minion_driver = {
 
 module_platform_driver(sdhci_minion_driver);
 
+static struct resource lowrisc_sd[] = {
+	[0] = {
+		.start = 0,
+		.end   = 0xFFF,
+		.flags = IORESOURCE_MEM,
+	},
+	[1] = {
+		.start = 0,
+		.end   = 0xFFF,
+		.flags = IORESOURCE_MEM,
+	},
+	[2] = {
+		.start = 0,
+		.end   = 0xFFF,
+		.flags = IORESOURCE_MEM,
+	},
+};
+
 static struct platform_device minion_mmc_device = {
 		.name = "sdhci-minion",
 		.id = -1,
-		.num_resources = 2,
-		.resource = (struct resource []) {
-			{
-				.start = 0x40010000,
-				.end = 0x40011fff,
-				.flags = IORESOURCE_MEM,
-			}, {
-				.start = 0,
-				.end = 32,
-				.flags = IORESOURCE_IRQ,
-			},
-		}
+		.num_resources = ARRAY_SIZE(lowrisc_sd),
+		.resource = lowrisc_sd,
 	};
 
 static int __init sdhci_minion_drv_init(void)
 {
-	pr_info("sdhci-minion: SDHCI platform\n");
+	// Find config string driver
+	struct device *csdev = bus_find_device_by_name(&platform_bus_type, NULL, "config-string");
+	struct platform_device *pcsdev = to_platform_device(csdev);
+	u64 hid_addr = config_string_u64(pcsdev, "hid.addr");
+	sd_addr = hid_addr + 0x00010000;
+	sdtx_addr = hid_addr + 0x00014000;
+	sdrx_addr = hid_addr + 0x00018000;
+	lowrisc_sd[0].start += sd_addr;
+	lowrisc_sd[0].end += sd_addr;
+	lowrisc_sd[1].start += sdtx_addr;
+	lowrisc_sd[1].end += sdtx_addr;
+	lowrisc_sd[2].start += sdrx_addr;
+	lowrisc_sd[2].end += sdrx_addr;
+	sd_base = (volatile uint32_t *)ioremap(sd_addr, 0x1000);
+	sdtx_base = (volatile uint32_t *)ioremap(sdtx_addr, 0x1000);
+	sdrx_base = (volatile uint32_t *)ioremap(sdrx_addr, 0x1000);
+	printk("sdhci-minion: address %llx, remapped to %p\n", sd_addr, sd_base);
         platform_device_register(&minion_mmc_device);
 	return 0;
 }
