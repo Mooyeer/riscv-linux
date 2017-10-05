@@ -19,7 +19,6 @@ static DEFINE_SPINLOCK(sbi_timer_lock);
 static struct tty_port xuart_tty_port;
 static struct tty_driver *xuart_tty_driver;
 static volatile uint32_t *keyb_base, *vid_base;
-static u64 keyb_addr, vid_addr;
 
 /* Timer callback */
 void timer_callback(unsigned long arg)
@@ -130,6 +129,19 @@ static struct console xuart_console = {
 	.index	= -1
 };
 
+static struct resource lowrisc_hid[] = {
+	[0] = {
+		.start = 0,
+		.end   = 0xFFF,
+		.flags = IORESOURCE_MEM,
+	},
+	[1] = {
+		.start = 0x8000,
+		.end   = 0xFFFF,
+		.flags = IORESOURCE_MEM,
+	},
+};
+
 static int __init xuart_console_init(void)
 {
 	int ret;
@@ -137,13 +149,15 @@ static int __init xuart_console_init(void)
 	struct device *csdev = bus_find_device_by_name(&platform_bus_type, NULL, "config-string");
 	struct platform_device *pcsdev = to_platform_device(csdev);
 	u64 hid_addr = config_string_u64(pcsdev, "hid.addr");
-	keyb_addr = hid_addr + 0x00000000;
-	vid_addr = hid_addr + 0x00008000;
+	lowrisc_hid[0].start += hid_addr;
+	lowrisc_hid[0].end += hid_addr;
+	lowrisc_hid[1].start += hid_addr;
+	lowrisc_hid[1].end += hid_addr;
+	keyb_base = (volatile uint32_t *)ioremap(lowrisc_hid[0].start, resource_size(lowrisc_hid+0));
+	vid_base = (volatile uint32_t *)ioremap(lowrisc_hid[1].start, resource_size(lowrisc_hid+1));
 	
-	keyb_base = (volatile uint32_t *)ioremap(keyb_addr, 0x1000);
-	vid_base = (volatile uint32_t *)ioremap(vid_addr, 0x8000);
-	
-	printk("hid_console address %llx, remapped to %p\n", vid_addr, vid_base);
+	printk("hid_keyboard address %llx, remapped to %p\n", lowrisc_hid[0].start, keyb_base);
+	printk("hid_display address %llx, remapped to %p\n", lowrisc_hid[1].start, vid_base);
 	
 	register_console(&xuart_console);
 

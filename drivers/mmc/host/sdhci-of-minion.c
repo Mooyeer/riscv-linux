@@ -1,6 +1,6 @@
 //#define SDHCI_VERBOSE3
 //#define SDHCI_VERBOSE2
-#define SDHCI_VERBOSE
+//#define SDHCI_VERBOSE
 /*
  * drivers/mmc/host/sdhci-of-minion.c
  *
@@ -34,14 +34,13 @@
 #include <asm/config-string.h>
 
 #include "sdhci-pltfm.h"
-//#include "sdhci-minion-hash-md5.h"
 #include <stdarg.h>
 
 extern int echo;
-void write_led(uint32_t data);
+void write_led(struct sdhci_host *host, uint32_t data);
 void myputhex(unsigned n, unsigned width);
-void sd_setting(int setting);
-void sd_cmd_start(int sd_cmd);
+void sd_setting(struct sdhci_host *host, int setting);
+void sd_cmd_start(struct sdhci_host *host, int sd_cmd);
 
 extern int printf (const char *, ...);
 extern void uart_init (void);
@@ -66,12 +65,9 @@ extern void uart_sendchar (const char c);
 extern void mystatus (void);
 // SDCARD entry point
 void spi_init(void);
-unsigned int sd_resp(int);
-void sd_timeout(int d_timeout);
-void sd_blksize(int d_blksize);
-void sd_blkcnt(int d_blkcnt);
-void rx_write_fifo(unsigned int data);
-unsigned int rx_read_fifo(void);
+void sd_timeout(struct sdhci_host *host, int d_timeout);
+void sd_blksize(struct sdhci_host *host, int d_blksize);
+void sd_blkcnt(struct sdhci_host *host, int d_blkcnt);
 int sd_read_sector(int, void *, int);
 void open_handle(void);
 void uart_printf(const char *fmt, ...);
@@ -92,11 +88,11 @@ void sdhci_write(struct sdhci_host *host, uint32_t val, int reg);
 uint32_t sdhci_read(struct sdhci_host *host, int reg);
 void sdhci_reset(struct sdhci_host *host, uint8_t mask);
 void minion_dispatch(const char *ucmd);
-void sd_reset(int sd_rst, int clk_rst, int data_rst, int cmd_rst);
-void sd_arg(unsigned arg);
-void sd_align(int d_align);
-void sd_clk_div(int clk_div);
-void sd_cmd(unsigned cmd);
+void sd_reset(struct sdhci_host *host, int sd_rst, int clk_rst, int data_rst, int cmd_rst);
+void sd_arg(struct sdhci_host *host, unsigned arg);
+void sd_align(struct sdhci_host *host, int d_align);
+void sd_clk_div(struct sdhci_host *host, int clk_div);
+void sd_cmd(struct sdhci_host *host, unsigned cmd);
 void board_mmc_power_init(void);
 int init_sd(void);
 
@@ -207,13 +203,9 @@ void myputhex(uint32_t n, uint32_t width)
   printk("%*X", width, n);
 }
 
-uint32_t sd_resp(int);
-void sd_timeout(int d_timeout);
-void sd_blksize(int d_blksize);
-void sd_blkcnt(int d_blkcnt);
-void tx_write_fifo(uint32_t data);
-uint32_t rx_read_fifo(void);
-
+void sd_timeout(struct sdhci_host *host, int d_timeout);
+void sd_blksize(struct sdhci_host *host, int d_blksize);
+void sd_blkcnt(struct sdhci_host *host, int d_blkcnt);
 void open_handle(void);
 void uart_printf(const char *fmt, ...);
 void log_printf(const char *fmt, ...);
@@ -228,83 +220,70 @@ void sdhci_reset(struct sdhci_host *host, uint8_t mask);
 void minion_dispatch(const char *ucmd);
 
 /* HID peripheral address space pointer */
-static u64 sd_addr, sdtx_addr, sdrx_addr;
-static volatile uint32_t *sd_base, *sdtx_base, *sdrx_base;
 
-void tx_write_fifo(uint32_t data)
+void write_led(struct sdhci_host *host, uint32_t data)
 {
-  sdtx_base[0] = data;
+  volatile uint32_t *sd_base = host->ioaddr;
+  sd_base[15] = data;
 }
 
-void rx_write_fifo(uint32_t data)
+void sd_align(struct sdhci_host *host, int d_align)
 {
-  sdrx_base[0] = data;
-}
-
-uint32_t rx_read_fifo(void)
-{
-  return sdrx_base[0];
-}
-
-void write_led(uint32_t data)
-{
-  if (sd_base)
-    sd_base[15] = data;
-}
-
-uint32_t sd_resp(int sel)
-{
-  uint32_t rslt = sd_base[sel];
-  return rslt;
-}
-
-void sd_align(int d_align)
-{
+  volatile uint32_t *sd_base = host->ioaddr;
   sd_base[0] = d_align;
 }
 
-void sd_clk_div(int clk_div)
+void sd_clk_div(struct sdhci_host *host, int clk_div)
 {
+  volatile uint32_t *sd_base = host->ioaddr;
   sd_base[1] = clk_div;
 }
 
-void sd_arg(uint32_t arg)
+void sd_arg(struct sdhci_host *host, uint32_t arg)
 {
+  volatile uint32_t *sd_base = host->ioaddr;
   sd_base[2] = arg;
 }
 
-void sd_cmd(uint32_t cmd)
+void sd_cmd(struct sdhci_host *host, uint32_t cmd)
 {
+  volatile uint32_t *sd_base = host->ioaddr;
   sd_base[3] = cmd;
 }
 
-void sd_setting(int setting)
+void sd_setting(struct sdhci_host *host, int setting)
 {
+  volatile uint32_t *sd_base = host->ioaddr;
   sd_base[4] = setting;
 }
 
-void sd_cmd_start(int sd_cmd)
+void sd_cmd_start(struct sdhci_host *host, int sd_cmd)
 {
+  volatile uint32_t *sd_base = host->ioaddr;
   sd_base[5] = sd_cmd;
 }
 
-void sd_reset(int sd_rst, int clk_rst, int data_rst, int cmd_rst)
+void sd_reset(struct sdhci_host *host, int sd_rst, int clk_rst, int data_rst, int cmd_rst)
 {
+  volatile uint32_t *sd_base = host->ioaddr;
   sd_base[6] = ((sd_rst&1) << 3)|((clk_rst&1) << 2)|((data_rst&1) << 1)|((cmd_rst&1) << 0);
 }
 
-void sd_blkcnt(int d_blkcnt)
+void sd_blkcnt(struct sdhci_host *host, int d_blkcnt)
 {
+  volatile uint32_t *sd_base = host->ioaddr;
   sd_base[7] = d_blkcnt&0xFFFF;
 }
 
-void sd_blksize(int d_blksize)
+void sd_blksize(struct sdhci_host *host, int d_blksize)
 {
+  volatile uint32_t *sd_base = host->ioaddr;
   sd_base[8] = d_blksize&0xFFF;
 }
 
-void sd_timeout(int d_timeout)
+void sd_timeout(struct sdhci_host *host, int d_timeout)
 {
+  volatile uint32_t *sd_base = host->ioaddr;
   sd_base[9] = d_timeout;
 }
 
@@ -333,12 +312,13 @@ static int sdhci_command;
 static int sdhci_argument;
 static int sdhci_host_control2;
 
-#define get_card_status(verbose) _get_card_status(__LINE__, verbose)
+#define get_card_status(verbose) _get_card_status(host, __LINE__, verbose)
 
 uint32_t card_status[32];
 
-static void _get_card_status(int line, int verbose)
+static void _get_card_status(struct sdhci_host *host, int line, int verbose)
 {
+  volatile uint32_t *sd_base = host->ioaddr;
   memcpy(card_status, (const void *)sd_base, sizeof(card_status)); 
 #ifdef SDHCI_VERBOSE3
   {
@@ -415,25 +395,21 @@ static void minion_sdhci_finish_data(struct sdhci_host *host)
 
 static void minion_sdhci_read_block_pio(struct sdhci_host *host)
 {
+  volatile uint32_t *sd_base = host->ioaddr;
 	unsigned long flags;
 	size_t blksize, len, chunk;
 	u32 uninitialized_var(scratch);
 	u8 *buf;
 	int i = 0;
-#ifdef SDHCI_MD5
-	md5_ctx_t context;
-#endif
 #ifdef SDHCI_VERBOSE3
 	printk("PIO reading\n");
 #endif
+        
 	blksize = host->data->blksz;
 	chunk = 0;
 
 	local_irq_save(flags);
 
-#ifdef SDHCI_MD5
-	md5_begin(&context);
-#endif	
 	while (blksize) {
 	  int idx = 0;
 	  BUG_ON(!sg_miter_next(&host->sg_miter));
@@ -447,9 +423,7 @@ static void minion_sdhci_read_block_pio(struct sdhci_host *host)
 	  
 	  while (len) {
 	    if (chunk == 0) {
-	      rx_write_fifo(0);
-	      scratch =  __be32_to_cpu(rx_read_fifo());
-	      i++;
+	      scratch = __be32_to_cpu(sd_base[0x2000 + i++]);
 	      chunk = 4;
 	    }
 	    
@@ -459,16 +433,7 @@ static void minion_sdhci_read_block_pio(struct sdhci_host *host)
 	    chunk--;
 	    len--;
 	  }
-
-#ifdef SDHCI_MD5
-	  md5_hash(&context, buf, idx);
-#endif
 	}
-	
-#ifdef SDHCI_MD5
-	md5_end(&context);
-	printk("arg=%X, md5 = %s\n", sdhci_argument, hash_bin_to_hex(&context));
-#endif
 	sg_miter_stop(&host->sg_miter);
 
 	local_irq_restore(flags);
@@ -476,15 +441,16 @@ static void minion_sdhci_read_block_pio(struct sdhci_host *host)
 
 static void minion_sdhci_write_block_pio(struct sdhci_host *host)
 {
-	unsigned long flags;
-	size_t blksize, len, chunk;
-	u32 scratch;
-	u8 *buf;
+  volatile uint32_t *sd_base = host->ioaddr;
+  unsigned long flags;
+  size_t blksize, len, chunk;
+  u32 scratch, i = 0;
+  u8 *buf;
 
 #ifdef SDHCI_VERBOSE3
 	printk("PIO writing\n");
 #endif
-
+        
 	blksize = host->data->blksz;
 	chunk = 0;
 	scratch = 0;
@@ -509,7 +475,7 @@ static void minion_sdhci_write_block_pio(struct sdhci_host *host)
 			len--;
 
 			if ((chunk == 4) || ((len == 0) && (blksize == 0))) {
-			  tx_write_fifo(__cpu_to_be32(scratch));
+			  sd_base[0x2000 + i++] = __cpu_to_be32(scratch);
 				chunk = 0;
 				scratch = 0;
 			}
@@ -580,28 +546,23 @@ void sd_transaction_finish(struct sdhci_host *host, int cmd_flags)
       }
   else
     timeout = 15;
-      sd_reset(0,1,0,1);
-      sd_align(0);
-      sd_arg(sdhci_argument);
-      sd_cmd(cmd_flags >> 8);
-      sd_setting(setting);
-      sd_cmd_start(0);
-      sd_reset(0,1,1,1);
-      sd_blkcnt(sdhci_block_count);
-      sd_blksize(sdhci_block_size&0xFFF);
-      sd_timeout(timeout);
+  sd_reset(host, 0,1,0,1);
+  sd_align(host, 0);
+  sd_arg(host, sdhci_argument);
+  sd_cmd(host, cmd_flags >> 8);
+  sd_setting(host, setting);
+  sd_cmd_start(host, 0);
+  sd_reset(host, 0,1,1,1);
+  sd_blkcnt(host, sdhci_block_count);
+  sd_blksize(host, sdhci_block_size&0xFFF);
+  sd_timeout(host, timeout);
       //      printk("Timeout control = %d\n", sdhci_timeout_control);
       get_card_status(0);
-      /* drain rx fifo, if needed */
-      while (1 & ~sd_base[5])
-	{
-	  rx_write_fifo(0);
-	}
       if ((sdhci_command & SDHCI_CMD_DATA) && !(sdhci_transfer_mode & SDHCI_TRNS_READ))
         {
           minion_sdhci_write_block_pio(host);
         }
-      sd_cmd_start(1);
+      sd_cmd_start(host, 1);
       get_card_status(1);
       timeout = 0;
       do
@@ -622,7 +583,7 @@ void sd_transaction_finish(struct sdhci_host *host, int cmd_flags)
       printk("%.8X,%.8X\n", card_status[5], card_status[4]);
       }
     #endif
-      memcpy(card_status, (const void *)sd_base, sizeof(card_status)); 
+      memcpy(card_status, (const void *)(host->ioaddr), sizeof(card_status)); 
       if (sdhci_command & SDHCI_CMD_DATA)
 	{
 	  do
@@ -669,8 +630,8 @@ void sd_transaction_finish(struct sdhci_host *host, int cmd_flags)
 #ifdef SDHCI_VERBOSE3
   printk("sd_transaction_finish stopping\n");
 #endif
-  sd_cmd_start(0);
-  sd_setting(0);
+  sd_cmd_start(host, 0);
+  sd_setting(host, 0);
 #ifdef SDHCI_VERBOSE3
   printk("sd_transaction_finish ended\n");
 #endif
@@ -681,7 +642,7 @@ void sdhci_minion_hw_reset(struct sdhci_host *host)
 #ifdef SDHCI_VERBOSE3
   printk("sdhci_minion_hw_reset();\n");
 #endif
-  write_led(0x55);
+  write_led(host, 0x55);
 }
 
 #ifdef SDHCI_VERBOSE
@@ -752,7 +713,7 @@ void sdhci_write(struct sdhci_host *host, uint32_t val, int reg)
 	    printk("4-bit bus disabled\n");
 	}
       if (sdhci_host_control != val)
-	write_led(sdhci_host_control);
+	write_led(host, sdhci_host_control);
       sdhci_host_control = val;
       break;
     case SDHCI_ARGUMENT	        :
@@ -765,10 +726,10 @@ void sdhci_write(struct sdhci_host *host, uint32_t val, int reg)
       if (val & SDHCI_POWER_ON)
 	{
 	  sdhci_minion_hw_reset(host);
-	  sd_reset(0,1,0,0);
+	  sd_reset(host, 0,1,0,0);
 	  get_card_status(0);
-	  sd_align(0);
-	  sd_reset(0,1,1,1);
+	  sd_align(host, 0);
+	  sd_reset(host, 0,1,1,1);
 	  switch (val & ~SDHCI_POWER_ON)
 	    {
 	    case SDHCI_POWER_180: printk("SD Power = 1.8V\n"); break;
@@ -779,7 +740,7 @@ void sdhci_write(struct sdhci_host *host, uint32_t val, int reg)
       else
 	{
 	printk("SD Power off\n"); 
-	sd_reset(1,0,0,0);
+	sd_reset(host, 1,0,0,0);
 	}
       sdhci_power_control = val;
       break;
@@ -809,13 +770,13 @@ void sdhci_write(struct sdhci_host *host, uint32_t val, int reg)
 #ifdef VERBOSE
 	  printk("Actual clock divider = %d\n", sdhci_clock_div);
 #endif
-	  sd_clk_div(sdhci_clock_div/2 - 1);
+	  sd_clk_div(host, sdhci_clock_div/2 - 1);
 	  sdhci_timeout_control = 2500000 / sdhci_clock_div;
 	  get_card_status(0);
 	}
       if (val & SDHCI_CLOCK_CARD_EN)
 	{
-	  sd_reset(0,1,1,1);
+	  sd_reset(host, 0,1,1,1);
 #ifdef VERBOSE
 	  printk("Card clock enabled\n");
 #endif
@@ -823,7 +784,7 @@ void sdhci_write(struct sdhci_host *host, uint32_t val, int reg)
 	}
       else
 	{
-	  sd_reset(0,0,1,1);
+	  sd_reset(host, 0,0,1,1);
 #ifdef VERBOSE
 	  printk("Card clock disabled\n");
 #endif
@@ -837,7 +798,7 @@ void sdhci_write(struct sdhci_host *host, uint32_t val, int reg)
     case SDHCI_SIGNAL_ENABLE	: sdhci_signal_enable = val; break;
     case SDHCI_PRESENT_STATE	: sdhci_present_state = val; break;
     case SDHCI_MAX_CURRENT	: sdhci_max_current = val; break;
-    case SDHCI_BUFFER           : printk("spurious tx_write_fifo\n"); break;
+    case SDHCI_BUFFER           : printk("spurious SDHCI_BUFFER\n"); break;
     case SDHCI_SET_ACMD12_ERROR	: sdhci_set_acmd12_error = val; break;
     case SDHCI_SET_INT_ERROR	: sdhci_set_int = val; break;
     case SDHCI_HOST_VERSION	: sdhci_host_version = val; break;
@@ -876,7 +837,7 @@ uint32_t sdhci_read(struct sdhci_host *host, int reg)
     case SDHCI_SOFTWARE_RESET    : rslt = 0; break;
     case SDHCI_BLOCK_GAP_CONTROL : rslt = sdhci_block_gap; break;
     case SDHCI_CLOCK_CONTROL     : rslt = (sdhci_clock_div << SDHCI_DIVIDER_SHIFT)|SDHCI_CLOCK_INT_STABLE; break;
-    case SDHCI_BUFFER            : printk("spurious rx_read_fifo\n"); rslt = 0; break;
+    case SDHCI_BUFFER            : printk("spurious SDHCI_BUFFER\n"); rslt = 0; break;
     case SDHCI_MAX_CURRENT       : rslt = 0; break;
     case SDHCI_POWER_CONTROL	 : rslt = sdhci_power_control; break;
     case SDHCI_WAKE_UP_CONTROL	 : rslt = sdhci_wake_up; break;
@@ -1001,20 +962,8 @@ static const struct sdhci_pltfm_data sdhci_minion_pdata = {
 
 static int sdhci_minion_probe(struct platform_device *pdev)
 {
-  int i;
-  for (i = 0; i < pdev->num_resources; i++)
-   {
-     struct resource *res = platform_get_resource(pdev, IORESOURCE_MEM, i);
-     void __iomem *base = devm_ioremap_resource(&pdev->dev, res);
-     printk("sdhci-minion: resource %d, address %llx, remapped to %p\n", i, res->start, base);
-     switch(i)
-       {
-       case 0: sd_base = base; break;
-       case 1: sdtx_base = base; break;
-       case 2: sdrx_base = base; break;
-       }
-   }
- return sdhci_pltfm_register(pdev, &sdhci_minion_pdata, 0);
+  int rc = sdhci_pltfm_register(pdev, &sdhci_minion_pdata, 0);
+  return rc;
 }
 
 static const struct of_device_id sdhci_minion_of_match[] = {
