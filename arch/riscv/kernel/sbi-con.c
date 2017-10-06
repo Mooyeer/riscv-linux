@@ -8,7 +8,7 @@
 #include <linux/interrupt.h>
 #include <linux/platform_device.h>
 #include <asm/config-string.h>
-#include <asm/sbi.h>
+//#include <asm/sbi.h>
 #include <linux/module.h>
 #include <linux/timer.h>
 #include <linux/spinlock.h>
@@ -18,7 +18,26 @@ static DEFINE_SPINLOCK(xuart_tty_port_lock);
 static DEFINE_SPINLOCK(sbi_timer_lock);
 static struct tty_port xuart_tty_port;
 static struct tty_driver *xuart_tty_driver;
-static volatile uint32_t *keyb_base, *vid_base;
+static volatile uint32_t *keyb_base, *vid_base, *uart_base_ptr;
+
+void xuart_putchar(int data)
+{
+  // wait until THR empty
+  //  while(! (*(uart_base_ptr + UART_LSR) & UART_LSR_TEMT));
+  while(! (*(uart_base_ptr + UART_LSR) & UART_LSR_THRE))
+    ;
+  *(uart_base_ptr + UART_TX) = data;
+}
+
+// enable uart read IRQ
+void xuart_enable_read_irq(void) {
+  *(uart_base_ptr + UART_IER) |= UART_IER_RDI;
+}
+
+// disable uart read IRQ
+void xuart_disable_read_irq(void) {
+  *(uart_base_ptr + UART_IER) &= ~UART_IER_RDI;
+}
 
 /* Timer callback */
 void timer_callback(unsigned long arg)
@@ -35,7 +54,6 @@ void timer_callback(unsigned long arg)
       spin_unlock(&xuart_tty_port_lock);
       key = *keyb_base;
     }
-  //  printk(KERN_INFO "keyb_timer callback\n");
   mod_timer(&keyb_timer, jiffies + 6); /* restarting timer */
 }
  
@@ -71,6 +89,24 @@ static void minion_console_putchar(unsigned char ch)
           vid_base[addr_int] = ' ';
       addr_int = 4096-256;
     }
+  xuart_putchar(ch);
+}
+
+static irqreturn_t xuart_console_isr(int irq, void *dev_id)
+{
+  irqreturn_t rc = IRQ_NONE;
+  if (*(uart_base_ptr + UART_LSR) & UART_LSR_DR)
+    {
+      int ch = *(uart_base_ptr + UART_RX);            
+      //      *(uart_base_ptr + UART_TX) = ch;
+      spin_lock(&xuart_tty_port_lock);
+      tty_insert_flip_char(&xuart_tty_port, ch, TTY_NORMAL);
+      tty_flip_buffer_push(&xuart_tty_port);
+      spin_unlock(&xuart_tty_port_lock);      
+      rc = IRQ_HANDLED;
+    }
+  xuart_enable_read_irq();
+  return rc;
 }
 
 static int xuart_tty_open(struct tty_struct *tty, struct file *filp)
@@ -149,12 +185,14 @@ static int __init xuart_console_init(void)
 	struct device *csdev = bus_find_device_by_name(&platform_bus_type, NULL, "config-string");
 	struct platform_device *pcsdev = to_platform_device(csdev);
 	u64 hid_addr = config_string_u64(pcsdev, "hid.addr");
+        u64 ubase_phys = config_string_u64(pcsdev, "uart.addr");
 	lowrisc_hid[0].start += hid_addr;
 	lowrisc_hid[0].end += hid_addr;
 	lowrisc_hid[1].start += hid_addr;
 	lowrisc_hid[1].end += hid_addr;
 	keyb_base = (volatile uint32_t *)ioremap(lowrisc_hid[0].start, resource_size(lowrisc_hid+0));
 	vid_base = (volatile uint32_t *)ioremap(lowrisc_hid[1].start, resource_size(lowrisc_hid+1));
+        uart_base_ptr = 0x400 + (volatile uint32_t *)ioremap(ubase_phys, 4096);
 	
 	printk("hid_keyboard address %llx, remapped to %p\n", lowrisc_hid[0].start, keyb_base);
 	printk("hid_display address %llx, remapped to %p\n", lowrisc_hid[1].start, vid_base);
@@ -181,6 +219,14 @@ static int __init xuart_console_init(void)
 	ret = tty_register_driver(xuart_tty_driver);
 	if (unlikely(ret))
 		goto out_tty_put;
+      
+	ret = request_irq(IRQ_SOFTWARE, xuart_console_isr, IRQF_SHARED,
+	                  xuart_tty_driver->driver_name, xuart_console_isr);
+
+	if (unlikely(ret))
+		goto out_tty_put;
+
+	xuart_console_isr(IRQ_SOFTWARE, NULL);
       
 	/* Init the spinlock */
 	spin_lock_init(&sbi_timer_lock);
