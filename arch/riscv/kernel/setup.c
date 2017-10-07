@@ -13,6 +13,7 @@
 #include <asm/pgtable.h>
 #include <asm/smp.h>
 #include <asm/sbi.h>
+#include <asm/irq.h>
 #include <asm/config-string.h>
 
 static char __initdata command_line[COMMAND_LINE_SIZE];
@@ -180,10 +181,15 @@ static struct platform_device xethernet_device = {
 
 static struct resource lowrisc_sd[] = {
 	[0] = {
-		.start = 0x00010000,
-		.end   = 0x0001FFFF,
-		.flags = IORESOURCE_MEM,
+	  .start = 0x00010000,
+	  .end   = 0x0001FFFF,
+	  .flags = IORESOURCE_MEM,
 	},
+        [1] = {
+	  .start = IRQ_SOFTWARE,
+	  .end = IRQ_SOFTWARE,
+	  .flags = IORESOURCE_IRQ,
+        },
 };
 
 static struct platform_device minion_mmc_device = {

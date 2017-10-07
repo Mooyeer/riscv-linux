@@ -960,10 +960,108 @@ static const struct sdhci_pltfm_data sdhci_minion_pdata = {
 	.ops = &sdhci_minion_ops,
 };
 
+static const struct sdhci_ops sdhci_pltfm_ops = {
+	.set_clock = sdhci_set_clock,
+	.set_bus_width = sdhci_set_bus_width,
+	.reset = sdhci_reset,
+	.set_uhs_signaling = sdhci_set_uhs_signaling,
+};
+
 static int sdhci_minion_probe(struct platform_device *pdev)
 {
-  int rc = sdhci_pltfm_register(pdev, &sdhci_minion_pdata, 0);
-  return rc;
+  const struct sdhci_pltfm_data *pdata = &sdhci_minion_pdata;
+  size_t priv_size = 0;
+  int ret = 0;
+
+  struct sdhci_host *host = 0;
+	struct resource *iomem;
+
+	iomem = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	if (!iomem) {
+		ret = -ENOMEM;
+		goto err;
+	}
+
+	if (resource_size(iomem) < 0x100)
+		dev_err(&pdev->dev, "Invalid iomem size!\n");
+
+	host = sdhci_alloc_host(&pdev->dev,
+		sizeof(struct sdhci_pltfm_host) + priv_size);
+
+	if (IS_ERR(host)) {
+		ret = PTR_ERR(host);
+		goto err;
+	}
+
+	host->hw_name = dev_name(&pdev->dev);
+	if (pdata && pdata->ops)
+		host->ops = pdata->ops;
+	else
+		host->ops = &sdhci_pltfm_ops;
+	if (pdata) {
+		host->quirks = pdata->quirks;
+		host->quirks2 = pdata->quirks2;
+	}
+
+	host->irq = platform_get_irq(pdev, 0);
+
+	if (!request_mem_region(iomem->start, resource_size(iomem),
+		mmc_hostname(host->mmc))) {
+		dev_err(&pdev->dev, "cannot request region\n");
+		ret = -EBUSY;
+		goto err_request;
+	}
+
+	host->ioaddr = ioremap(iomem->start, resource_size(iomem));
+	if (!host->ioaddr) {
+		dev_err(&pdev->dev, "failed to remap registers\n");
+		ret = -ENOMEM;
+		goto err_remap;
+	}
+
+	/*
+	 * Some platforms need to probe the controller to be able to
+	 * determine which caps should be used.
+	 */
+	if (host->ops && host->ops->platform_init)
+		host->ops->platform_init(host);
+
+	platform_set_drvdata(pdev, host);
+
+	ret = sdhci_add_host(host);
+	if (ret)
+	  {
+	    iounmap(host->ioaddr);
+	    release_mem_region(iomem->start, resource_size(iomem));
+	    sdhci_free_host(host);
+	  }
+	return ret;
+
+err_remap:
+	release_mem_region(iomem->start, resource_size(iomem));
+err_request:
+	sdhci_free_host(host);
+err:
+	dev_err(&pdev->dev, "%s failed %d\n", __func__, ret);
+	return PTR_ERR(host);
+  
+  return ret;
+}
+
+int sdhci_minion_unregister(struct platform_device *pdev)
+{
+	struct sdhci_host *host = platform_get_drvdata(pdev);
+	struct sdhci_pltfm_host *pltfm_host = sdhci_priv(host);
+	struct resource *iomem = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	int dead = (readl(host->ioaddr + SDHCI_INT_STATUS) == 0xffffffff);
+
+	sdhci_remove_host(host, dead);
+	clk_disable_unprepare(pltfm_host->clk);
+	iounmap(host->ioaddr);
+	release_mem_region(iomem->start, resource_size(iomem));
+	sdhci_free_host(host);
+
+	return 0;
 }
 
 static const struct of_device_id sdhci_minion_of_match[] = {
@@ -979,7 +1077,7 @@ static struct platform_driver sdhci_minion_driver = {
 		.pm = SDHCI_PLTFM_PMOPS,
 	},
 	.probe = sdhci_minion_probe,
-	.remove = sdhci_pltfm_unregister,
+	.remove = sdhci_minion_unregister,
 };
 
 module_platform_driver(sdhci_minion_driver);

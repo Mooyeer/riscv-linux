@@ -18,12 +18,42 @@ static DEFINE_SPINLOCK(xuart_tty_port_lock);
 static DEFINE_SPINLOCK(sbi_timer_lock);
 static struct tty_port xuart_tty_port;
 static struct tty_driver *xuart_tty_driver;
-static volatile uint32_t *keyb_base, *vid_base;
+static volatile uint32_t *keyb_base, *vid_base, *uart_base_ptr;
+
+void xuart_base_ptr(void)
+{
+  if (!uart_base_ptr)
+    {
+      // Find config string driver
+      struct device *csdev = bus_find_device_by_name(&platform_bus_type, NULL, "config-string");
+      struct platform_device *pcsdev = to_platform_device(csdev);
+      u64 ubase_phys = config_string_u64(pcsdev, "uart.addr");
+      uart_base_ptr = 0x400 + (volatile uint32_t *)ioremap(ubase_phys, 8192);
+    }
+}
+
+void xuart_putchar(int data)
+{
+  if (!uart_base_ptr) xuart_base_ptr();
+  // wait until THR empty
+  while(! (*(uart_base_ptr + UART_LSR) & UART_LSR_TEMT));
+    ;
+  *(uart_base_ptr + UART_TX) = data;
+}
 
 /* Timer callback */
 void timer_callback(unsigned long arg)
 {
   uint32_t key = *keyb_base;
+  if (!uart_base_ptr) xuart_base_ptr();
+  if (*(uart_base_ptr + UART_LSR) & UART_LSR_DR)
+    {
+      int ch = *(uart_base_ptr + UART_RX);            
+      spin_lock(&xuart_tty_port_lock);
+      tty_insert_flip_char(&xuart_tty_port, ch, TTY_NORMAL);
+      tty_flip_buffer_push(&xuart_tty_port);
+      spin_unlock(&xuart_tty_port_lock);      
+    }
   while ((1<<16) & ~key) /* FIFO not empty */
     {
       int ch;
@@ -71,6 +101,7 @@ static void minion_console_putchar(unsigned char ch)
           vid_base[addr_int] = ' ';
       addr_int = 4096-256;
     }
+  xuart_putchar(ch);
 }
 
 static int xuart_tty_open(struct tty_struct *tty, struct file *filp)
