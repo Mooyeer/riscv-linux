@@ -71,6 +71,7 @@ static void minion_console_putchar(unsigned char ch)
           vid_base[addr_int] = ' ';
       addr_int = 4096-256;
     }
+  sbi_console_putchar(ch);
 }
 
 static int xuart_tty_open(struct tty_struct *tty, struct file *filp)

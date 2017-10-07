@@ -13,6 +13,7 @@
 #include <asm/pgtable.h>
 #include <asm/smp.h>
 #include <asm/sbi.h>
+#include <asm/irq.h>
 #include <asm/config-string.h>
 
 static char __initdata command_line[COMMAND_LINE_SIZE];
@@ -184,6 +185,12 @@ static struct resource lowrisc_sd[] = {
 		.end   = 0x0001FFFF,
 		.flags = IORESOURCE_MEM,
 	},
+        {
+                .name   = "sd_irq",
+                .flags  = IORESOURCE_IRQ,
+                .start  = IRQ_SOFTWARE,
+                .end    = IRQ_SOFTWARE,
+        },
 };
 
 static struct platform_device minion_mmc_device = {
