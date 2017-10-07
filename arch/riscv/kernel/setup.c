@@ -186,6 +186,7 @@ static struct resource lowrisc_sd[] = {
 	  .flags = IORESOURCE_MEM,
 	},
         [1] = {
+          .name   = "sd_irq",
 	  .start = IRQ_SOFTWARE,
 	  .end = IRQ_SOFTWARE,
 	  .flags = IORESOURCE_IRQ,
