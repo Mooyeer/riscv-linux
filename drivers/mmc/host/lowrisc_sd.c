@@ -171,6 +171,7 @@ static void lowrisc_sd_finish_request(struct lowrisc_sd_host *host)
 	mmc_request_done(host->mmc, mrq);
 }
 
+#ifdef THREADED
 static irqreturn_t lowrisc_sd_thread_irq(int irq, void *dev_id)
 {
 	struct lowrisc_sd_host *host = dev_id;
@@ -203,8 +204,8 @@ static irqreturn_t lowrisc_sd_thread_irq(int irq, void *dev_id)
 	if (count > data->blksz)
 		count = data->blksz;
 
-	LOG "count: %08x, flags %08x\n", count,
-		data->flags);
+LOG (("count: %08x, flags %08x\n", count,
+      data->flags));
 	/* Transfer the data */
 	if (data->flags & MMC_DATA_READ)
           memcpy(buf, (void*)&sd_base[data_buffer_offset], count >> 2);
@@ -218,12 +219,12 @@ done:
 
 	return IRQ_HANDLED;
 }
-
+#endif
+  
 static void lowrisc_sd_cmd_irq(struct lowrisc_sd_host *host)
 {
 	struct mmc_command *cmd = host->cmd;
         volatile uint32_t *sd_base = host->ioaddr;
-	u32 data;
 
 	LOGV "lowrisc_sd_cmd_irq\n");
 	
@@ -250,7 +251,7 @@ static void lowrisc_sd_cmd_irq(struct lowrisc_sd_host *host)
 	  cmd->resp[0] = sd_base[resp0];
 	}
 
-	LOG "Command IRQ complete %d %d %x\n", cmd->opcode, cmd->error, cmd->flags);
+LOG (("Command IRQ complete %d %d %x\n", cmd->opcode, cmd->error, cmd->flags));
 
 	/* If there is data to handle we will
 	 * finish the request in the mmc_data_end_irq handler.*/
@@ -272,7 +273,7 @@ static void lowrisc_sd_data_end_irq(struct lowrisc_sd_host *host)
 	u8 *buf;
 	int i = 0;
 	
-	LOG "lowrisc_sd_data_end_irq\n");
+	LOG (("lowrisc_sd_data_end_irq\n"));
 
 	host->data = NULL;
 
@@ -280,47 +281,51 @@ static void lowrisc_sd_data_end_irq(struct lowrisc_sd_host *host)
 		dev_warn(&host->pdev->dev, "Spurious data end IRQ\n");
 		return;
 	}
+
+        if (data->flags & MMC_DATA_READ)
+	  {
         
-	blksize = data->blksz;
-	chunk = 0;
+	    blksize = data->blksz;
+	    chunk = 0;
 
-	local_irq_save(flags);
+	    local_irq_save(flags);
 
-	while (blksize) {
-	  int idx = 0;
-	  BUG_ON(!sg_miter_next(&host->sg_miter));
+	    while (blksize) {
+	      int idx = 0;
+	      BUG_ON(!sg_miter_next(&host->sg_miter));
 	  
-	  len = min(host->sg_miter.length, blksize);
+	      len = min(host->sg_miter.length, blksize);
 	  
-	  blksize -= len;
-	  host->sg_miter.consumed = len;
+	      blksize -= len;
+	      host->sg_miter.consumed = len;
 	  
-	  buf = host->sg_miter.addr;
+	      buf = host->sg_miter.addr;
 	  
-	  while (len) {
-	    if (chunk == 0) {
-	      scratch = __be32_to_cpu(sd_base[0x2000 + i++]);
-	      chunk = 4;
+	      while (len) {
+		if (chunk == 0) {
+		  scratch = __be32_to_cpu(sd_base[0x2000 + i++]);
+		  chunk = 4;
+		}
+		
+		buf[idx] = scratch & 0xFF;	    
+		idx++;
+		scratch >>= 8;
+		chunk--;
+		len--;
+	      }
 	    }
-	    
-	    buf[idx] = scratch & 0xFF;	    
-	    idx++;
-	    scratch >>= 8;
-	    chunk--;
-	    len--;
-	  }
-	}
-	sg_miter_stop(&host->sg_miter);
+	    sg_miter_stop(&host->sg_miter);
 
-	local_irq_restore(flags);
+	    local_irq_restore(flags);
+	  }
 
 	if (data->error == 0)
 		data->bytes_xfered = data->blocks * data->blksz;
 	else
 		data->bytes_xfered = 0;
 
-	LOG "Completed data request xfr=%d\n",
-		data->bytes_xfered);
+	LOG (("Completed data request xfr=%d\n",
+	      data->bytes_xfered));
 
         //	iowrite16(0, host->ioaddr + SD_STOPINTERNAL);
 
@@ -348,7 +353,7 @@ static irqreturn_t lowrisc_sd_irq(int irq, void *dev_id)
 
 	if (sd_base[wait_resp] >= sd_base[timeout_resp]) {
 		error = -ETIMEDOUT;
-		LOG "Timeout %d clocks\n", sd_base[timeout_resp]);
+		LOG (("Timeout %d clocks\n", sd_base[timeout_resp]));
 	} else if (int_reg & 0) {
 		error = -EILSEQ;
 		dev_err(&host->pdev->dev, "BadCRC\n");
@@ -380,7 +385,7 @@ static irqreturn_t lowrisc_sd_irq(int irq, void *dev_id)
 	  {
 	    int mask = (host->int_en & ~SD_CARD_CARD_REMOVED_0) | SD_CARD_CARD_INSERTED_0;
 	    sd_irq_en(host, mask);
-	    LOG "Card removed, mask changed to %d\n", mask);
+	    LOG (("Card removed, mask changed to %d\n", mask));
 	    mmc_detect_change(host->mmc, 1);
 	  }
 	
@@ -389,7 +394,7 @@ static irqreturn_t lowrisc_sd_irq(int irq, void *dev_id)
 	  {
 	    int mask = (host->int_en & ~SD_CARD_CARD_INSERTED_0) | SD_CARD_CARD_REMOVED_0 ;
 	    sd_irq_en(host, mask);
-	    LOG "Card inserted, mask changed to %d\n", mask);
+	    LOG (("Card inserted, mask changed to %d\n", mask));
 	    lowrisc_sd_init(host);
 	    mmc_detect_change(host->mmc, 1);
 	  }
@@ -415,52 +420,6 @@ irq_end:
         sd_irq_en(host, host->int_en);
 	spin_unlock(&host->lock);
 	return ret;
-}
-
-static void minion_sdhci_write_block_pio(struct lowrisc_sd_host *host)
-{
-  volatile uint32_t *sd_base = host->ioaddr;
-  unsigned long flags;
-  size_t blksize, len, chunk;
-  u32 scratch, i = 0;
-  u8 *buf;
-
-	LOGV "PIO writing\n");
-        
-	blksize = host->data->blksz;
-	chunk = 0;
-	scratch = 0;
-
-	local_irq_save(flags);
-
-	while (blksize) {
-		BUG_ON(!sg_miter_next(&host->sg_miter));
-
-		len = min(host->sg_miter.length, blksize);
-
-		blksize -= len;
-		host->sg_miter.consumed = len;
-
-		buf = host->sg_miter.addr;
-
-		while (len) {
-			scratch |= (u32)*buf << (chunk * 8);
-
-			buf++;
-			chunk++;
-			len--;
-
-			if ((chunk == 4) || ((len == 0) && (blksize == 0))) {
-			  sd_base[0x2000 + i++] = __cpu_to_be32(scratch);
-				chunk = 0;
-				scratch = 0;
-			}
-		}
-	}
-
-	sg_miter_stop(&host->sg_miter);
-
-	local_irq_restore(flags);
 }
 
 static void lowrisc_sd_start_cmd(struct lowrisc_sd_host *host, struct mmc_command *cmd)
@@ -510,22 +469,12 @@ static void lowrisc_sd_start_cmd(struct lowrisc_sd_host *host, struct mmc_comman
 LOGV "testing data flags\n");
   if (data) {
     setting |= 0x4;
-    sd_blkcnt(host, data->blocks);
-    sd_blksize(host, data->blksz&0xFFF);
-#if 0    
-    if (data->blocks > 1) {
-      sd_cmd(host, SD_STOPINT_AUTO_ISSUE_CMD12);
-      c |= SD_CMD_MULTI_BLOCK;
-    }
-#endif
     if (data->flags & MMC_DATA_READ)
       setting |= 0x10;
     else
       {
       setting |= 0x8;
-      //      minion_sdhci_write_block_pio(host);
       }
-    /* MMC_DATA_WRITE does not require a bit to be set */
   }
 
 LOGV "writing registers\n");
@@ -550,8 +499,8 @@ static void lowrisc_sd_start_data(struct lowrisc_sd_host *host, struct mmc_data 
 {
 	unsigned int flags = SG_MITER_ATOMIC;
 
-	LOG "setup data transfer: blocksize %08x  nr_blocks %d, offset: %08x\n",
-		data->blksz, data->blocks, data->sg->offset);
+	LOG (("setup data transfer: blocksize %08x  nr_blocks %d, offset: %08x\n",
+	      data->blksz, data->blocks, data->sg->offset));
 
 	host->data = data;
 
@@ -565,6 +514,46 @@ static void lowrisc_sd_start_data(struct lowrisc_sd_host *host, struct mmc_data 
 	/* Set transfer length and blocksize */
 	sd_blkcnt(host, data->blocks);
 	sd_blksize(host, data->blksz);
+
+        if (!(data->flags & MMC_DATA_READ))
+	  {
+        volatile uint32_t *sd_base = host->ioaddr;
+	struct mmc_data *data = host->data;
+	if (sg_miter_next(&host->sg_miter))
+{
+  size_t blksize, len, chunk;
+  u32 scratch, i = 0;
+  u8 *buf;
+  LOG (("count: %08x, flags %08x\n", data->blksz, data->flags));
+
+	blksize = data->blksz;
+	chunk = 0;
+	scratch = 0;
+
+	len = min(host->sg_miter.length, blksize);
+
+	blksize -= len;
+	host->sg_miter.consumed = len;
+
+	buf = host->sg_miter.addr;
+
+	while (len) {
+			scratch |= (u32)*buf << (chunk * 8);
+
+			buf++;
+			chunk++;
+			len--;
+
+			if ((chunk == 4) || ((len == 0) && (blksize == 0))) {
+			  sd_base[0x2000 + i++] = __cpu_to_be32(scratch);
+				chunk = 0;
+				scratch = 0;
+			}
+	}
+
+	sg_miter_stop(&host->sg_miter);
+	  }
+        }
 }
 
 /* Process requests from the MMC layer */
@@ -626,7 +615,6 @@ static int lowrisc_sd_card_busy(struct mmc_host *mmc)
 {
 	struct lowrisc_sd_host *host = mmc_priv(mmc);
         volatile uint32_t *sd_base = host->ioaddr;
-	u32 present_state;
 	return sd_base[resp0] >> 31;
 }
 
@@ -692,7 +680,7 @@ static int lowrisc_sd_probe(struct platform_device *pdev)
 
 	lowrisc_sd_init(host);
 
-	ret = request_threaded_irq(host->irq, lowrisc_sd_irq, lowrisc_sd_thread_irq,
+	ret = request_irq(host->irq, lowrisc_sd_irq,
 				   IRQF_SHARED, DRIVER_NAME, host);
 	if (ret)
 		goto unmap;
