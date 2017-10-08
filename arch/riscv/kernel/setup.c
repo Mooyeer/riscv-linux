@@ -194,7 +194,7 @@ static struct resource lowrisc_sd[] = {
 };
 
 static struct platform_device minion_mmc_device = {
-		.name = "sdhci-minion",
+		.name = "lowrisc-sd",
 		.id = -1,
 		.num_resources = ARRAY_SIZE(lowrisc_sd),
 		.resource = lowrisc_sd,

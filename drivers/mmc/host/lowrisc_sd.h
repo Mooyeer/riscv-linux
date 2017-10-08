@@ -14,65 +14,36 @@
  * your option) any later version.
  */
 
-#define SD_CMD			0x00	/* also for SDIO */
-#define SD_ARG0			0x04	/* also for SDIO */
-#define SD_ARG1			0x06	/* also for SDIO */
-#define SD_STOPINTERNAL		0x08
-#define SD_BLOCKCOUNT		0x0a	/* also for SDIO */
-#define SD_RESPONSE0		0x0c	/* also for SDIO */
-#define SD_RESPONSE1		0x0e	/* also for SDIO */
-#define SD_RESPONSE2		0x10	/* also for SDIO */
-#define SD_RESPONSE3		0x12	/* also for SDIO */
-#define SD_RESPONSE4		0x14	/* also for SDIO */
-#define SD_RESPONSE5		0x16	/* also for SDIO */
-#define SD_RESPONSE6		0x18	/* also for SDIO */
-#define SD_RESPONSE7		0x1a	/* also for SDIO */
-#define SD_CARDSTATUS		0x1c	/* also for SDIO */
-#define SD_BUFFERCTRL		0x1e	/* also for SDIO */
-#define SD_INTMASKCARD		0x20	/* also for SDIO */
-#define SD_INTMASKBUFFER	0x22	/* also for SDIO */
-#define SD_CARDCLOCKCTRL	0x24
-#define SD_CARDXFERDATALEN	0x26	/* also for SDIO */
-#define SD_CARDOPTIONSETUP	0x28	/* also for SDIO */
-#define SD_ERRORSTATUS0		0x2c	/* also for SDIO */
-#define SD_ERRORSTATUS1		0x2e	/* also for SDIO */
-#define SD_DATAPORT		0x30	/* also for SDIO */
-#define SD_TRANSACTIONCTRL	0x34	/* also for SDIO */
-#define SD_SOFTWARERESET	0xe0	/* also for SDIO */
+enum {align_reg,clk_din_reg,arg_reg,cmd_reg,
+      setting_reg,start_reg,reset_reg,blkcnt_reg,
+      blksiz_reg,timeout_reg,clk_pll_reg,irq_en_reg,
+      unused1,unused2,unused3,led_reg};
 
-#define SD_CMD_TYPE_CMD			(0 << 6)
-#define SD_CMD_TYPE_ACMD		(1 << 6)
-#define SD_CMD_TYPE_AUTHEN		(2 << 6)
-#define SD_CMD_RESP_TYPE_NONE		(3 << 8)
-#define SD_CMD_RESP_TYPE_EXT_R1		(4 << 8)
-#define SD_CMD_RESP_TYPE_EXT_R1B	(5 << 8)
-#define SD_CMD_RESP_TYPE_EXT_R2		(6 << 8)
-#define SD_CMD_RESP_TYPE_EXT_R3		(7 << 8)
-#define SD_CMD_RESP_TYPE_EXT_R6		(4 << 8)
-#define SD_CMD_RESP_TYPE_EXT_R7		(4 << 8)
-#define SD_CMD_DATA_PRESENT		BIT(11)
-#define SD_CMD_TRANSFER_READ		BIT(12)
-#define SD_CMD_MULTI_BLOCK		BIT(13)
-#define SD_CMD_SECURITY_CMD		BIT(14)
-#define SD_STOPINT_ISSUE_CMD12		BIT(0)
-#define SD_STOPINT_AUTO_ISSUE_CMD12	BIT(8)
-#define SD_CARD_PRESENT_0	BIT(5)
-#define SD_CARD_WRITE_PROTECT	BIT(7)
+enum {resp0,resp1,resp2,resp3,
+      wait_resp,status_resp,packet_resp0,packet_resp1,
+      data_wait_resp,trans_cnt_resp,obsolete1,obsolet2,
+      detect_resp,xfr_addr_resp,irq_stat_resp,pll_resp,
+      align_resp,clk_din_resp,arg_resp,cmd_i_resp,
+      setting_resp,start_resp,reset_resp,blkcnt_resp,
+      blksize_resp,timeout_resp,clk_pll_resp,irq_en_resp};
+
+enum {SD_APP_OP_COND=41, data_buffer_offset=0x2000};
 
 enum {SD_CARD_RESP_END=1,SD_CARD_RW_END=2, SD_CARD_CARD_REMOVED_0=4, SD_CARD_CARD_INSERTED_0=8};
 
 struct lowrisc_sd_host {
-  	struct platform_device *pdev;
-	struct mmc_host *mmc;
+  struct platform_device *pdev;
+  struct mmc_host *mmc;
 
-	spinlock_t lock;
+  spinlock_t lock;
 
-	struct mmc_request *mrq;/* Current request */
-	struct mmc_command *cmd;/* Current command */
-	struct mmc_data *data;	/* Current data request */
+  struct mmc_request *mrq;/* Current request */
+  struct mmc_command *cmd;/* Current command */
+  struct mmc_data *data;	/* Current data request */
 
-	struct sg_mapping_iter sg_miter; /* for PIO */
+  struct sg_mapping_iter sg_miter; /* for PIO */
 
-	void __iomem *ioaddr; /* mapped address */
-        int irq;
+  void __iomem *ioaddr; /* mapped address */
+  int irq;
+  int int_en, width_setting;
 };
