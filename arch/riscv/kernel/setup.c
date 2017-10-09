@@ -186,6 +186,7 @@ static struct resource lowrisc_sd[] = {
 	  .flags = IORESOURCE_MEM,
 	},
         [1] = {
+          .name   = "sd_irq",
 	  .start = IRQ_SOFTWARE,
 	  .end = IRQ_SOFTWARE,
 	  .flags = IORESOURCE_IRQ,
@@ -193,7 +194,7 @@ static struct resource lowrisc_sd[] = {
 };
 
 static struct platform_device minion_mmc_device = {
-		.name = "sdhci-minion",
+		.name = "lowrisc-sd",
 		.id = -1,
 		.num_resources = ARRAY_SIZE(lowrisc_sd),
 		.resource = lowrisc_sd,

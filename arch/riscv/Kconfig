@@ -103,8 +103,6 @@ config CPU_RV_LOWRISC
 	bool "LowRISC Rocket without compressed instructions"
 	select CPU_SUPPORTS_64BIT_KERNEL
 	select MMC
-	select MMC_SDHCI
-	select MMC_SDHCI_OF_MINION
 endchoice
 
 config CPU_SUPPORTS_32BIT_KERNEL
