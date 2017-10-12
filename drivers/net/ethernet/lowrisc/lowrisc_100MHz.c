@@ -135,7 +135,7 @@ static void inline eth_disable_irq(struct net_local *lp)
 static void lowrisc_update_address(struct net_local *lp, u8 *address_ptr)
 {
   uint32_t macaddr_lo, macaddr_hi;
-  uint32_t flags = MACHI_ALLPACKETS_MASK|MACHI_DATA_DLY_MASK|MACHI_COOKED_MASK;
+  uint32_t flags = MACHI_ALLPACKETS_MASK|MACHI_DATA_DLY_MASK|MACHI_ENABLED_MASK;
   memcpy (&macaddr_lo, address_ptr+2, sizeof(uint32_t));
   memcpy (&macaddr_hi, address_ptr+0, sizeof(uint16_t));
   eth_write(lp, MACLO_OFFSET, htonl(macaddr_lo));
@@ -481,68 +481,89 @@ irqreturn_t lowrisc_ether_isr(int irq, void *dev_id)
   irqreturn_t rc = IRQ_NONE;
   struct net_device *ndev = dev_id;
   struct net_local *lp = netdev_priv(ndev);
+  volatile unsigned int *eth_base = (volatile unsigned int *)(lp->ioaddr);
   static struct sk_buff *skb;
   unsigned int align;
   int i, fcs, rplr, len;
+  uint32_t hi, lo, match;
   spin_lock(&(lp->lock));
   /* Check if there is Rx Data available */
   if (eth_read(lp, RSR_OFFSET) & RSR_RECV_DONE_MASK)
     {
-      /* acknowledge, even if an error occurs, to reset irq */
-      eth_write(lp, RSR_OFFSET, 0);
       rc = IRQ_HANDLED;
-      skb = netdev_alloc_skb(ndev, ETH_FRAME_LEN + ETH_FCS_LEN + ALIGNMENT);
-      if (!skb)
-        {
-          /* Couldn't get memory. */
-          ndev->stats.rx_dropped++;
-          dev_err(&lp->ndev->dev, "Could not allocate receive buffer\n");
-        }
-      else
-        {
-          /*
-           * A new skb should have the data halfword aligned, but this code is
-           * here just in case that isn't true. Calculate how many
-           * bytes we should reserve to get the data to start on a word
-           * boundary */
-          align = BUFFER_ALIGN(skb->data);
-          if (align)
-            skb_reserve(skb, align);
-          
-          skb_reserve(skb, 2);
-
-          fcs = eth_read(lp, RFCS_OFFSET);
-          rplr = eth_read(lp, RPLR_OFFSET);
-          len = (rplr & RPLR_LENGTH_MASK) >> 16;
-          if ((len >= 14) && (fcs == 0xc704dd7b))
+      fcs = eth_read(lp, RFCS_OFFSET);
+      rplr = eth_read(lp, RPLR_OFFSET);
+      len = (rplr & RPLR_LENGTH_MASK) >> 16;
+      hi = eth_base[1];
+      lo = eth_base[2];
+      match = !memcmp(ndev->dev_addr, (const void *)(eth_base+1), ETH_ALEN);
+      if ((len >= 14) && (fcs == 0xc704dd7b) && (len <= ETH_FRAME_LEN + ETH_FCS_LEN) &&
+	  (((hi&0xff)==0xff) || match))
             {
-              int rnd;
-              uint32_t *alloc;
               len -= 4; /* discard FCS bytes */
-              rnd = (((len-1)|3)+1); /* round to a multiple of 4 */
-              alloc = (uint32_t *)(skb->data);
-              for (i = 0; i < rnd/4; i++)
-                {
-                  alloc[i] = eth_read(lp, RXBUFF_OFFSET+(i<<2));
-                }
-              skb_put(skb, len);	/* Tell the skb how much data we got */
+	      skb = netdev_alloc_skb(ndev, len + ALIGNMENT);
+	      if (!skb)
+		{
+		  /* Couldn't get memory. */
+		  ndev->stats.rx_dropped++;
+		  dev_err(&lp->ndev->dev, "Could not allocate receive buffer\n");
+		}
+	      else
+		{
+		  uint32_t *alloc;
+		  int rnd = (((len-1)|3)+1); /* round to a multiple of 4 */
+		  /*
+		   * A new skb should have the data halfword aligned, but this code is
+		   * here just in case that isn't true. Calculate how many
+		   * bytes we should reserve to get the data to start on a word
+		   * boundary */
+		  align = BUFFER_ALIGN(skb->data);
+		  if (align)
+		    skb_reserve(skb, align);
+		  skb_reserve(skb, 2);
+		  alloc = (uint32_t *)(skb->data);
+		  for (i = 0; i < rnd/4; i++)
+		    {
+		      alloc[i] = eth_read(lp, RXBUFF_OFFSET+(i<<2));
+		    }
+		  skb_put(skb, len);	/* Tell the skb how much data we got */
               
-              skb->protocol = eth_type_trans(skb, ndev);
-              skb_checksum_none_assert(skb);
+		  skb->protocol = eth_type_trans(skb, ndev);
+		  skb_checksum_none_assert(skb);
               
-              ndev->stats.rx_packets++;
-              ndev->stats.rx_bytes += len;
+		  ndev->stats.rx_packets++;
+		  ndev->stats.rx_bytes += len;
               
-              if (!skb_defer_rx_timestamp(skb))
-                netif_rx(skb);	/* Send the packet upstream */
-            }
-          else
-            {
-              ndev->stats.rx_errors++;
-              dev_kfree_skb_irq(skb);
-            }
-        }
+		  if (!skb_defer_rx_timestamp(skb))
+		    netif_rx(skb);	/* Send the packet upstream */
+		}
+	    }
+      else
+	{
+#if 0
+	  printk("RX packet err: ");
+	  if (fcs != 0xc704dd7b) printk("fcs != 0xc704dd7b ");
+	  if ((len < 14) || (len > ETH_FRAME_LEN + ETH_FCS_LEN))
+	    printk("(len < 14) || (len > ETH_FRAME_LEN + ETH_FCS_LEN) /*len=%d*/", len);
+	  if (!match)
+	    printk("Destination %x:%x:%x:%x:%x:%x, we have %x:%x:%x:%x:%x:%x",
+		   hi&0xff, (hi>>8)&0xff, (hi>>16)&0xff, (hi>>24)&0xff,
+		   lo&0xff, (lo>>8)&0xff, 
+		   ndev->dev_addr[0],
+		   ndev->dev_addr[1],
+		   ndev->dev_addr[2],
+		   ndev->dev_addr[3],
+		   ndev->dev_addr[4],
+		   ndev->dev_addr[5]);
+	  for (i = 0; i < 10; i++)
+	    printk(" %.8X", eth_base[i]);
+	  printk("\n");
+#endif	  
+	  ndev->stats.rx_errors++;
+	}
     }
+  /* acknowledge, even if an error occurs, to reset irq */
+  eth_write(lp, RSR_OFFSET, 0);
   spin_unlock(&(lp->lock));
   eth_enable_irq(lp);
   
@@ -589,9 +610,10 @@ static int lowrisc_open(struct net_device *ndev)
 
   /* We're ready to go */
   netif_start_queue(ndev);
-
+#if 0
   /* first call to handler enables the irq */
   lowrisc_ether_isr(IRQ_SOFTWARE, ndev);
+#endif  
   return 0;
 }
 
@@ -714,7 +736,7 @@ static int lowrisc_100MHz_probe(struct platform_device *ofdev)
         struct resource *lowrisc_ethernet = ofdev->resource;
 	unsigned char mac_address[7];
 	int rc = 0;
-        strcpy(mac_address, "\xe0\xe1\xe2\xe3\xe4\xe5");
+        strcpy(mac_address, "\xee\xe1\xe2\xe3\xe4\xe5");
         lowrisc_ethernet = platform_get_resource(ofdev, IORESOURCE_MEM, 0);
 
 	/* Create an ethernet device instance */

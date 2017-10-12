@@ -20,7 +20,7 @@
 
 /* MAC Ctrl Register (MACHI) Bit Masks */
 #define MACHI_MACADDR_MASK    0x0000FFFF     /* MAC high 16-bits mask */
-#define MACHI_COOKED_MASK     0x00010000     /* Rx cooked packets */
+#define MACHI_ENABLED_MASK    0x00010000     /* Enable incoming Rx packets */
 #define MACHI_LOOPBACK_MASK   0x00020000     /* Rx loopback packets */
 #define MACHI_LOOPBACK2_MASK  0x00040000     /* Rx byte loopback packets */
 #define MACHI_DATA_DLY_MASK   0x00180000     /* Rx packet data buffer alignment delay */
