@@ -20,10 +20,40 @@
 #include <asm/page.h>
 #include <asm/csr.h>
 
+#define SBI_SET_TIMER 0
+#define SBI_CONSOLE_PUTCHAR 1
+#define SBI_CONSOLE_GETCHAR 2
+#define SBI_CLEAR_IPI 3
+#define SBI_SEND_IPI 4
+#define SBI_REMOTE_FENCE_I 5
+#define SBI_REMOTE_SFENCE_VMA 6
+#define SBI_REMOTE_SFENCE_VMA_ASID 7
+#define SBI_SHUTDOWN 8
+
 __INIT
 ENTRY(_start)
+  la s0, str
+1:
+  lbu a0, (s0)
+  beqz a0, 1f
+  li a7, SBI_CONSOLE_PUTCHAR
+  ecall
+  add s0, s0, 1
+  j 1b
+
+1:
+  auipc s0, %pcrel_hi(_real_start)
+  addi s0, s0, %pcrel_lo(_real_start)
+  j _real_start
+  li a7, SBI_SHUTDOWN
+  ecall
+
+str:
+  .asciz "This is bbl's first message in supervisor mode. Kernel is booting..\n"
+
 	/* Load the global pointer (before any use of la) */
-1:	auipc gp, %pcrel_hi(_gp)
+ENTRY(_real_start)
+	auipc gp, %pcrel_hi(_gp)
 	addi gp, gp, %pcrel_lo(1b)
 
 	/* Disable FPU to detect illegal usage of
