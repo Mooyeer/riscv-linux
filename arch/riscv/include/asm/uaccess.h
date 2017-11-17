@@ -1,3 +1,18 @@
+/*
+ * Copyright (C) 2012 Regents of the University of California
+ *
+ *   This program is free software; you can redistribute it and/or
+ *   modify it under the terms of the GNU General Public License
+ *   as published by the Free Software Foundation, version 2.
+ *
+ *   This program is distributed in the hope that it will be useful,
+ *   but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *   GNU General Public License for more details.
+ *
+ * This file was copied from include/asm-generic/uaccess.h
+ */
+
 #ifndef _ASM_RISCV_UACCESS_H
 #define _ASM_RISCV_UACCESS_H
 
@@ -10,13 +25,10 @@
 #include <asm/byteorder.h>
 #include <asm/asm.h>
 
-#ifdef CONFIG_RV_PUM
-#define __enable_user_access() __asm__ ("csrc sstatus, %0" : : "r" (SR_PUM))
-#define __disable_user_access() __asm__ ("csrs sstatus, %0" : : "r" (SR_PUM))
-#else
-#define __enable_user_access()
-#define __disable_user_access()
-#endif
+#define __enable_user_access()							\
+	__asm__ __volatile__ ("csrs sstatus, %0" : : "r" (SR_SUM) : "memory")
+#define __disable_user_access()							\
+	__asm__ __volatile__ ("csrc sstatus, %0" : : "r" (SR_SUM) : "memory")
 
 /*
  * The fs value determines whether argument validity checking should be
@@ -69,12 +81,14 @@ static inline void set_fs(mm_segment_t fs)
 	likely(__access_ok((unsigned long __force)(addr), (size)));	\
 })
 
-/* Ensure that the range [addr, addr+size) is within the process's
+/*
+ * Ensure that the range [addr, addr+size) is within the process's
  * address space
  */
 static inline int __access_ok(unsigned long addr, unsigned long size)
 {
 	const mm_segment_t fs = get_fs();
+
 	return (size <= fs) && (addr <= (fs - size));
 }
 
@@ -95,7 +109,7 @@ struct exception_table_entry {
 	unsigned long insn, fixup;
 };
 
-extern int fixup_exception(struct pt_regs *);
+extern int fixup_exception(struct pt_regs *state);
 
 #if defined(__LITTLE_ENDIAN)
 #define __MSW	1
@@ -117,6 +131,7 @@ extern int fixup_exception(struct pt_regs *);
 #define __get_user_asm(insn, x, ptr, err)			\
 do {								\
 	uintptr_t __tmp;					\
+	__typeof__(x) __x;					\
 	__enable_user_access();					\
 	__asm__ __volatile__ (					\
 		"1:\n"						\
@@ -130,21 +145,15 @@ do {								\
 		"	jump 2b, %2\n"				\
 		"	.previous\n"				\
 		"	.section __ex_table,\"a\"\n"		\
-		"	.balign " SZPTR "\n"			\
-		"	" PTR " 1b, 3b\n"			\
+		"	.balign " RISCV_SZPTR "\n"			\
+		"	" RISCV_PTR " 1b, 3b\n"			\
 		"	.previous"				\
-		: "+r" (err), "=&r" (x), "=r" (__tmp)		\
+		: "+r" (err), "=&r" (__x), "=r" (__tmp)		\
 		: "m" (*(ptr)), "i" (-EFAULT));			\
 	__disable_user_access();				\
+	(x) = __x;						\
 } while (0)
-#else /* !CONFIG_MMU */
-#define __get_user_asm(insn, x, ptr, err)			\
-	__asm__ __volatile__ (					\
-		insn " %0, %1"					\
-		: "=r" (x)					\
-		: "m" (*(ptr)))
 #endif /* CONFIG_MMU */
-
 
 #ifdef CONFIG_64BIT
 #define __get_user_8(x, ptr, err) \
@@ -172,9 +181,9 @@ do {								\
 		"	jump 3b, %3\n"				\
 		"	.previous\n"				\
 		"	.section __ex_table,\"a\"\n"		\
-		"	.balign " SZPTR "\n"			\
-		"	" PTR " 1b, 4b\n"			\
-		"	" PTR " 2b, 4b\n"			\
+		"	.balign " RISCV_SZPTR "\n"			\
+		"	" RISCV_PTR " 1b, 4b\n"			\
+		"	" RISCV_PTR " 2b, 4b\n"			\
 		"	.previous"				\
 		: "+r" (err), "=&r" (__lo), "=r" (__hi),	\
 			"=r" (__tmp)				\
@@ -184,9 +193,6 @@ do {								\
 	(x) = (__typeof__(x))((__typeof__((x)-(x)))(		\
 		(((u64)__hi << 32) | __lo)));			\
 } while (0)
-#else /* !CONFIG_MMU */
-#define __get_user_8(x, ptr, err) \
-	(x) = (__typeof__(x))(*((u64 __user *)(ptr)))
 #endif /* CONFIG_MMU */
 #endif /* CONFIG_64BIT */
 
@@ -213,7 +219,7 @@ do {								\
  */
 #define __get_user(x, ptr)					\
 ({								\
-	register int __gu_err = 0;				\
+	register long __gu_err = 0;				\
 	const __typeof__(*(ptr)) __user *__gu_ptr = (ptr);	\
 	__chk_user_ptr(__gu_ptr);				\
 	switch (sizeof(*__gu_ptr)) {				\
@@ -266,6 +272,7 @@ do {								\
 #define __put_user_asm(insn, x, ptr, err)			\
 do {								\
 	uintptr_t __tmp;					\
+	__typeof__(*(ptr)) __x = x;				\
 	__enable_user_access();					\
 	__asm__ __volatile__ (					\
 		"1:\n"						\
@@ -278,19 +285,13 @@ do {								\
 		"	jump 2b, %1\n"				\
 		"	.previous\n"				\
 		"	.section __ex_table,\"a\"\n"		\
-		"	.balign " SZPTR "\n"			\
-		"	" PTR " 1b, 3b\n"			\
+		"	.balign " RISCV_SZPTR "\n"			\
+		"	" RISCV_PTR " 1b, 3b\n"			\
 		"	.previous"				\
 		: "+r" (err), "=r" (__tmp), "=m" (*(ptr))	\
-		: "rJ" (x), "i" (-EFAULT));			\
+		: "rJ" (__x), "i" (-EFAULT));			\
 	__disable_user_access();				\
 } while (0)
-#else /* !CONFIG_MMU */
-#define __put_user_asm(insn, x, ptr, err)			\
-	__asm__ __volatile__ (					\
-		insn " %z1, %0"					\
-		: "=m" (*(ptr))					\
-		: "rJ" (x))
 #endif /* CONFIG_MMU */
 
 
@@ -318,9 +319,9 @@ do {								\
 		"	jump 2b, %1\n"				\
 		"	.previous\n"				\
 		"	.section __ex_table,\"a\"\n"		\
-		"	.balign " SZPTR "\n"			\
-		"	" PTR " 1b, 4b\n"			\
-		"	" PTR " 2b, 4b\n"			\
+		"	.balign " RISCV_SZPTR "\n"			\
+		"	" RISCV_PTR " 1b, 4b\n"			\
+		"	" RISCV_PTR " 2b, 4b\n"			\
 		"	.previous"				\
 		: "+r" (err), "=r" (__tmp),			\
 			"=m" (__ptr[__LSW]),			\
@@ -328,9 +329,6 @@ do {								\
 		: "rJ" (__x), "rJ" (__x >> 32), "i" (-EFAULT));	\
 	__disable_user_access();				\
 } while (0)
-#else /* !CONFIG_MMU */
-#define __put_user_8(x, ptr, err)				\
-	*((u64 __user *)(ptr)) = (u64)(x)
 #endif /* CONFIG_MMU */
 #endif /* CONFIG_64BIT */
 
@@ -356,7 +354,7 @@ do {								\
  */
 #define __put_user(x, ptr)					\
 ({								\
-	register int __pu_err = 0;				\
+	register long __pu_err = 0;				\
 	__typeof__(*(ptr)) __user *__gu_ptr = (ptr);		\
 	__chk_user_ptr(__gu_ptr);				\
 	switch (sizeof(*__gu_ptr)) {				\
@@ -453,5 +451,82 @@ static inline unsigned long __must_check clear_user(void __user *to, unsigned lo
 	return access_ok(VERIFY_WRITE, to, n) ?
 		__clear_user(to, n) : n;
 }
+
+/*
+ * Atomic compare-and-exchange, but with a fixup for userspace faults.  Faults
+ * will set "err" to -EFAULT, while successful accesses return the previous
+ * value.
+ */
+#ifdef CONFIG_MMU
+#define __cmpxchg_user(ptr, old, new, err, size, lrb, scb)	\
+({								\
+	__typeof__(ptr) __ptr = (ptr);				\
+	__typeof__(*(ptr)) __old = (old);			\
+	__typeof__(*(ptr)) __new = (new);			\
+	__typeof__(*(ptr)) __ret;				\
+	__typeof__(err) __err = 0;				\
+	register unsigned int __rc;				\
+	__enable_user_access();					\
+	switch (size) {						\
+	case 4:							\
+		__asm__ __volatile__ (				\
+		"0:\n"						\
+		"	lr.w" #scb " %[ret], %[ptr]\n"		\
+		"	bne          %[ret], %z[old], 1f\n"	\
+		"	sc.w" #lrb " %[rc], %z[new], %[ptr]\n"	\
+		"	bnez         %[rc], 0b\n"		\
+		"1:\n"						\
+		".section .fixup,\"ax\"\n"			\
+		".balign 4\n"					\
+		"2:\n"						\
+		"	li %[err], %[efault]\n"			\
+		"	jump 1b, %[rc]\n"			\
+		".previous\n"					\
+		".section __ex_table,\"a\"\n"			\
+		".balign " RISCV_SZPTR "\n"			\
+		"	" RISCV_PTR " 1b, 2b\n"			\
+		".previous\n"					\
+			: [ret] "=&r" (__ret),			\
+			  [rc]  "=&r" (__rc),			\
+			  [ptr] "+A" (*__ptr),			\
+			  [err] "=&r" (__err)			\
+			: [old] "rJ" (__old),			\
+			  [new] "rJ" (__new),			\
+			  [efault] "i" (-EFAULT));		\
+		break;						\
+	case 8:							\
+		__asm__ __volatile__ (				\
+		"0:\n"						\
+		"	lr.d" #scb " %[ret], %[ptr]\n"		\
+		"	bne          %[ret], %z[old], 1f\n"	\
+		"	sc.d" #lrb " %[rc], %z[new], %[ptr]\n"	\
+		"	bnez         %[rc], 0b\n"		\
+		"1:\n"						\
+		".section .fixup,\"ax\"\n"			\
+		".balign 4\n"					\
+		"2:\n"						\
+		"	li %[err], %[efault]\n"			\
+		"	jump 1b, %[rc]\n"			\
+		".previous\n"					\
+		".section __ex_table,\"a\"\n"			\
+		".balign " RISCV_SZPTR "\n"			\
+		"	" RISCV_PTR " 1b, 2b\n"			\
+		".previous\n"					\
+			: [ret] "=&r" (__ret),			\
+			  [rc]  "=&r" (__rc),			\
+			  [ptr] "+A" (*__ptr),			\
+			  [err] "=&r" (__err)			\
+			: [old] "rJ" (__old),			\
+			  [new] "rJ" (__new),			\
+			  [efault] "i" (-EFAULT));		\
+		break;						\
+	default:						\
+		BUILD_BUG();					\
+	}							\
+	__disable_user_access();				\
+	(err) = __err;						\
+	__ret;							\
+})
+#endif /* CONFIG_MMU */
 
 #endif /* _ASM_RISCV_UACCESS_H */

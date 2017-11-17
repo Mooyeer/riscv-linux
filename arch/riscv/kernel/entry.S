@@ -1,3 +1,17 @@
+/*
+ * Copyright (C) 2012 Regents of the University of California
+ * Copyright (C) 2017 SiFive
+ *
+ *   This program is free software; you can redistribute it and/or
+ *   modify it under the terms of the GNU General Public License
+ *   as published by the Free Software Foundation, version 2.
+ *
+ *   This program is distributed in the hope that it will be useful,
+ *   but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *   GNU General Public License for more details.
+ */
+
 #include <linux/init.h>
 #include <linux/linkage.h>
 
@@ -9,6 +23,11 @@
 
 	.text
 	.altmacro
+
+/*
+ * Prepares to enter a system call or exception by saving all registers to the
+ * stack.
+ */
 	.macro SAVE_ALL
 	LOCAL _restore_kernel_sp
 	LOCAL _save_context
@@ -54,8 +73,10 @@ _save_context:
 	REG_S x30, PT_T5(sp)
 	REG_S x31, PT_T6(sp)
 
-	/* Disable FPU to detect illegal usage of
-	   floating point in kernel space */
+	/*
+	 * Disable FPU to detect illegal usage of
+	 * floating point in kernel space
+	 */
 	li t0, SR_FS
 
 	csrr s0, sscratch
@@ -70,6 +91,10 @@ _save_context:
 	REG_S s4, PT_SCAUSE(sp)
 	.endm
 
+/*
+ * Prepares to return from a system call or exception by restoring all
+ * registers from the stack.
+ */
 	.macro RESTORE_ALL
 	REG_L a0, PT_SSTATUS(sp)
 	REG_L a2, PT_SEPC(sp)
@@ -142,7 +167,7 @@ ENTRY(handle_exception)
 	beq s4, t0, handle_syscall
 
 	/* Handle other exceptions */
-	slli t0, s4, LGPTR
+	slli t0, s4, RISCV_LGPTR
 	la t1, excp_vect_table
 	la t2, excp_vect_table_end
 	move a0, sp /* pt_regs */
@@ -173,7 +198,7 @@ check_syscall_nr:
 	/* Syscall number held in a7 */
 	bgeu a7, t0, 1f
 	la s0, sys_call_table
-	slli t0, a7, LGPTR
+	slli t0, a7, RISCV_LGPTR
 	add s0, s0, t0
 	REG_L s0, 0(s0)
 1:
@@ -384,16 +409,16 @@ ENDPROC(__fstate_restore)
 	.section ".rodata"
 	/* Exception vector table */
 ENTRY(excp_vect_table)
-	PTR do_trap_insn_misaligned
-	PTR do_page_fault
-	PTR do_trap_insn_illegal
-	PTR do_trap_unknown
-	PTR do_trap_unknown
-	PTR do_page_fault
-	PTR do_trap_unknown
-	PTR do_page_fault
-	PTR 0 /* handle_syscall */
-	PTR do_trap_break
+	RISCV_PTR do_trap_insn_misaligned
+	RISCV_PTR do_page_fault
+	RISCV_PTR do_trap_insn_illegal
+	RISCV_PTR do_trap_unknown
+	RISCV_PTR do_trap_unknown
+	RISCV_PTR do_page_fault
+	RISCV_PTR do_trap_unknown
+	RISCV_PTR do_page_fault
+	RISCV_PTR 0 /* handle_syscall */
+	RISCV_PTR do_trap_break
 excp_vect_table_end:
 END(excp_vect_table)
 

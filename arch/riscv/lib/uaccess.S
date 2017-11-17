@@ -8,8 +8,8 @@
 _epc:
 	\op \reg, \addr
 	.section __ex_table,"a"
-	.balign SZPTR
-	PTR _epc, \lbl
+	.balign RISCV_SZPTR
+	RISCV_PTR _epc, \lbl
 	.previous
 	.endm
 
@@ -17,8 +17,8 @@ ENTRY(__copy_user)
 
 #ifdef CONFIG_RV_PUM
 	/* Enable access to user memory */
-	li t6, SR_PUM
-	csrc sstatus, t6
+	li t6, SR_SUM
+	csrs sstatus, t6
 #endif
 
 	add a3, a1, a2
@@ -30,7 +30,8 @@ ENTRY(__copy_user)
 	addi t0, a1, SZREG-1
 	andi t1, a3, ~(SZREG-1)
 	andi t0, t0, ~(SZREG-1)
-	/* a3: terminal address of source region
+	/*
+	 * a3: terminal address of source region
 	 * t0: lowest XLEN-aligned address in source
 	 * t1: highest XLEN-aligned address in source
 	 */
@@ -48,7 +49,7 @@ ENTRY(__copy_user)
 3:
 #ifdef CONFIG_RV_PUM
 	/* Disable access to user memory */
-	csrs sstatus, t6
+	csrc sstatus, t6
 #endif
 	li a0, 0
 	ret
@@ -73,15 +74,16 @@ ENTRY(__clear_user)
 
 #ifdef CONFIG_RV_PUM
 	/* Enable access to user memory */
-	li t6, SR_PUM
-	csrc sstatus, t6
+	li t6, SR_SUM
+	csrs sstatus, t6
 #endif
 
 	add a3, a0, a1
 	addi t0, a0, SZREG-1
 	andi t1, a3, ~(SZREG-1)
 	andi t0, t0, ~(SZREG-1)
-	/* a3: terminal address of target region
+	/*
+	 * a3: terminal address of target region
 	 * t0: lowest doubleword-aligned address in target region
 	 * t1: highest doubleword-aligned address in target region
 	 */
@@ -97,7 +99,7 @@ ENTRY(__clear_user)
 3:
 #ifdef CONFIG_RV_PUM
 	/* Disable access to user memory */
-	csrs sstatus, t6
+	csrc sstatus, t6
 #endif
 	li a0, 0
 	ret

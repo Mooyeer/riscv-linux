@@ -1,3 +1,16 @@
+/*
+ * Copyright (C) 2012 Regents of the University of California
+ *
+ *   This program is free software; you can redistribute it and/or
+ *   modify it under the terms of the GNU General Public License
+ *   as published by the Free Software Foundation, version 2.
+ *
+ *   This program is distributed in the hope that it will be useful,
+ *   but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *   GNU General Public License for more details.
+ */
+
 #include <asm/thread_info.h>
 #include <asm/asm-offsets.h>
 #include <asm/asm.h>
@@ -20,7 +33,7 @@ ENTRY(_start)
 
 #ifdef CONFIG_RV_PUM
 	/* Prevent inadvertent access to user memory */
-	li t0, SR_PUM
+	li t0, SR_SUM
 	csrs sstatus, t0
 #endif
 
