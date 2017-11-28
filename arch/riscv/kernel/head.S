@@ -32,28 +32,10 @@
 
 __INIT
 ENTRY(_start)
-  la s0, str
-1:
-  lbu a0, (s0)
-  beqz a0, 1f
-  li a7, SBI_CONSOLE_PUTCHAR
-  ecall
-  add s0, s0, 1
-  j 1b
-
-1:
-  auipc s0, %pcrel_hi(_real_start)
-  addi s0, s0, %pcrel_lo(_real_start)
-  j _real_start
-  li a7, SBI_SHUTDOWN
-  ecall
-
-str:
-  .asciz "This is bbl's first message in supervisor mode. Kernel is booting..\n"
-
-	/* Load the global pointer (before any use of la) */
-ENTRY(_real_start)
-	auipc gp, %pcrel_hi(_gp)
+        la a0, str
+        call early
+        /* Load the global pointer (before any use of la) */
+1:      auipc gp, %pcrel_hi(_gp)
 	addi gp, gp, %pcrel_lo(1b)
 
 	/* Disable FPU to detect illegal usage of
@@ -68,8 +50,13 @@ ENTRY(_real_start)
 #endif
 
 	/* See if we're the main hart */
-	call sbi_hart_id
+        la a0, str2
+        call early
+#	call sbi_hart_id
+        li a0, 0
 	bnez a0, .Lsecondary_start
+        la a0, str3
+        call early
 
 	/* Clear the .bss segment */
 	la a0, __bss_start
@@ -83,6 +70,9 @@ ENTRY(_real_start)
 	/* Initialize current task_struct pointer */
 	la tp, init_task
 
+        la a0, str4
+        call early
+        
 	tail start_kernel
 
 .Lsecondary_start:
@@ -106,12 +96,41 @@ ENTRY(_real_start)
 	tail smp_callin
 #endif
 
+str:
+  .asciz "This is bbl's first message in supervisor mode. Kernel is booting..\n"
+
+str2:
+  .asciz "check HART"                  
+
+str3:
+  .asciz "main HART"                  
+
+str4:
+  .asciz "start kernel"                  
+
 .Lsecondary_park:
 	/* We lack SMP support or have too many harts, so park this hart */
 	wfi
 	j .Lsecondary_park
 END(_start)
-
+ENTRY(early)
+        li      a7, SBI_CONSOLE_PUTCHAR
+        mv      s0,a0
+        lbu     a0,0(s0)
+        beqz    a0,2f
+3:     
+        addi    s0,s0,1
+        ecall
+        lbu     a0,0(s0)
+        bnez    a0,3b
+2:      
+        li      a0,13
+        ecall
+        li      a0,10
+        ecall
+        ret
+END(early)
+        
 __PAGE_ALIGNED_BSS
 	/* Empty zero page */
 	.balign PAGE_SIZE
