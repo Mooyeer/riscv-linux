@@ -10,22 +10,19 @@
 #define MACLO_OFFSET        0x0800          /* MAC address low 32-bits */
 #define MACHI_OFFSET        0x0804          /* MAC address high 16-bits and MAC ctrl */
 #define TPLR_OFFSET         0x0808          /* Tx packet length */
-#define TFCS_OFFSET         0x080C          /* Tx frame check sequence register */
+#define OLD_TFCS_OFFSET     0x080C          /* Obsolete Tx frame check sequence register */
 #define MDIOCTRL_OFFSET     0x0810          /* MDIO Control Register */
-#define RFCS_OFFSET         0x0814          /* Rx frame check sequence register */
+#define OLD_RFCS_OFFSET     0x0814          /* Obsolete Rx frame check sequence register */
 #define RSR_OFFSET          0x0818          /* Rx status and reset register */
 #define RPLR_OFFSET         0x081C          /* Rx packet length register */
 
-#define RXBUFF_OFFSET       0x0004          /* Receive Buffer */
+#define RXBUFF_OFFSET       0x0000          /* Receive Buffer */
 #define MDIORD_RDDATA_MASK    0x0000FFFF    /* Data to be Read */
 
 /* MAC Ctrl Register (MACHI) Bit Masks */
 #define MACHI_MACADDR_MASK    0x0000FFFF     /* MAC high 16-bits mask */
-#define MACHI_ENABLED_MASK    0x00010000     /* Enable incoming Rx packets */
+#define MACHI_COOKED_MASK     0x00010000     /* obsolete flag */
 #define MACHI_LOOPBACK_MASK   0x00020000     /* Rx loopback packets */
-#define MACHI_LOOPBACK2_MASK  0x00040000     /* Rx byte loopback packets */
-#define MACHI_DATA_DLY_MASK   0x00180000     /* Rx packet data buffer alignment delay */
-#define MACHI_ALLPACKETS_MASK 0x00200000     /* Rx all packets (promiscuous mode) */
 #define MACHI_IRQ_EN          0x00400000     /* Rx packet interrupt enable */
 
 /* MDIO Control Register Bit Masks */
@@ -42,10 +39,10 @@
 
 /* Receive Status Register (RSR) */
 #define RSR_RECV_DONE_MASK    0x00000001      /* Rx complete */
-#define RSR_RECV_ERR_MASK     0x00000002      /* Rx fcs_err bit */
+#define RSR_RECV_IRQ_MASK     0x00000002      /* Rx irq bit */
 
 /* Receive Packet Length Register (RPLR) */
-#define RPLR_LENGTH_MASK      0x0FFF0000      /* Rx packet length */
+#define RPLR_LENGTH_MASK      0x00000FFF      /* Rx packet length */
 #define RPLR_ERROR_MASK       0x40000000      /* Rx error mask */
 #define RPLR_FCS_ERROR_MASK   0x80000000      /* Rx FCS error mask */
 

@@ -127,7 +127,7 @@ static void inline eth_disable_irq(struct net_local *lp)
 static void lowrisc_update_address(struct net_local *lp, u8 *address_ptr)
 {
   uint32_t macaddr_lo, macaddr_hi;
-  uint32_t flags = MACHI_ALLPACKETS_MASK|MACHI_DATA_DLY_MASK|MACHI_ENABLED_MASK;
+  uint32_t flags = 0;
   memcpy (&macaddr_lo, address_ptr+2, sizeof(uint32_t));
   memcpy (&macaddr_hi, address_ptr+0, sizeof(uint16_t));
   eth_write(lp, MACLO_OFFSET, htonl(macaddr_lo));
@@ -492,11 +492,10 @@ irqreturn_t lowrisc_ether_isr(int irq, void *dev_id)
   /* Check if there is Rx Data available */
   if (eth_read(lp, RSR_OFFSET) & RSR_RECV_DONE_MASK)
     {
-      int fcs = eth_read(lp, RFCS_OFFSET);
       int rplr = eth_read(lp, RPLR_OFFSET);
-      int len = ((rplr & RPLR_LENGTH_MASK) >> 16) - 4; /* discard FCS bytes */
+      int len = rplr & RPLR_LENGTH_MASK; /* No FCS bytes */
       rc = IRQ_HANDLED;
-      if ((len >= 14) && (fcs == 0xc704dd7b) && (len <= ETH_FRAME_LEN + ETH_FCS_LEN + ALIGNMENT))
+      if ((len >= 14) && ((rplr & RPLR_FCS_ERROR_MASK) == 0) && (len <= ETH_FRAME_LEN + ETH_FCS_LEN + ALIGNMENT))
 	{
 	  uint32_t *alloc;
 	  int rnd = (((len-1)|3)+1); /* round to a multiple of 4 */
