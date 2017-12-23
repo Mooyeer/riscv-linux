@@ -162,7 +162,7 @@ static struct spi_board_info lowrisc_spi_board_info[] __initdata = {
 static struct resource lowrisc_ethernet[] = {
 	[0] = {
 		.start = 0,
-		.end   = 0x1FFF,
+		.end   = 0x7FFF,
 		.flags = IORESOURCE_MEM,
 	},
 };
