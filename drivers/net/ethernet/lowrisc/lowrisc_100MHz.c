@@ -127,7 +127,7 @@ static void inline eth_disable_irq(struct net_local *lp)
 static void lowrisc_update_address(struct net_local *lp, u8 *address_ptr)
 {
   uint32_t macaddr_lo, macaddr_hi;
-  uint32_t flags = MACHI_ALLPACKETS_MASK|MACHI_DATA_DLY_MASK|MACHI_ENABLED_MASK;
+  uint32_t flags = 0;
   memcpy (&macaddr_lo, address_ptr+2, sizeof(uint32_t));
   memcpy (&macaddr_hi, address_ptr+0, sizeof(uint16_t));
   eth_write(lp, MACLO_OFFSET, htonl(macaddr_lo));
@@ -485,18 +485,22 @@ err_out_1:
 
 irqreturn_t lowrisc_ether_isr(int irq, void *dev_id)
 {
+  int bufreg, buf, nxt;
   irqreturn_t rc = IRQ_NONE;
   struct net_device *ndev = dev_id;
   struct net_local *lp = netdev_priv(ndev);
   spin_lock(&(lp->lock));
   /* Check if there is Rx Data available */
-  if (eth_read(lp, RSR_OFFSET) & RSR_RECV_DONE_MASK)
+  bufreg = eth_read(lp, BUF_OFFSET);
+  buf = bufreg & BUF_FIRST_MASK;
+  nxt = (bufreg & BUF_NEXT_MASK) >> BUF_NEXT_SHIFT;
+  while (nxt != buf)
     {
-      int fcs = eth_read(lp, RFCS_OFFSET);
-      int rplr = eth_read(lp, RPLR_OFFSET);
-      int len = ((rplr & RPLR_LENGTH_MASK) >> 16) - 4; /* discard FCS bytes */
+      int len = eth_read(lp, RPLR_OFFSET + ((buf&7)<<2));
+      int fcserr = (eth_read(lp, FCSERR_OFFSET) >> (buf&7)) & 1;
+      int rxbuff = RXBUFF_OFFSET+((buf&7)<<11);
       rc = IRQ_HANDLED;
-      if ((len >= 14) && (fcs == 0xc704dd7b) && (len <= ETH_FRAME_LEN + ETH_FCS_LEN + ALIGNMENT))
+      if ((len >= 14) && (fcserr == 0) && (len <= ETH_FRAME_LEN + ETH_FCS_LEN + ALIGNMENT))
 	{
 	  uint32_t *alloc;
 	  int rnd = (((len-1)|3)+1); /* round to a multiple of 4 */
@@ -522,7 +526,7 @@ irqreturn_t lowrisc_ether_isr(int irq, void *dev_id)
               alloc = (uint32_t *)(skb->data);
               for (i = 0; i < rnd/4; i++)
                 {
-                  alloc[i] = eth_read(lp, RXBUFF_OFFSET+(i<<2));
+                  alloc[i] = eth_read(lp, rxbuff+(i<<2));
                 }
               skb_put(skb, len);	/* Tell the skb how much data we got */
               
@@ -539,7 +543,8 @@ irqreturn_t lowrisc_ether_isr(int irq, void *dev_id)
       else
 	  ndev->stats.rx_errors++;
       /* acknowledge, even if an error occurs, to reset irq */
-      eth_write(lp, RSR_OFFSET, 0);
+      buf = (buf+1)&0xF;
+      eth_write(lp, BUF_OFFSET, (((buf+8)&0xF)<<8) | buf); /* acknowledge */
     }
   spin_unlock(&(lp->lock));
   eth_enable_irq(lp);
