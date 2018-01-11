@@ -135,6 +135,22 @@ static void lowrisc_update_address(struct net_local *lp, u8 *address_ptr)
 }
 
 /**
+ * lowrisc_read_mac_address - Read the MAC address in the device
+ * @drvdata:	Pointer to the Ether100MHz device private data
+ * @address_ptr:Pointer to the 6-byte buffer to receive the MAC address (MAC address is a 48-bit value)
+ *
+ * In lowrisc the starting value is programmed by the boot loader according to DIP switch [15:12]
+ */
+
+static void lowrisc_read_mac_address(struct net_local *lp, u8 *address_ptr)
+{
+  uint32_t macaddr_hi = ntohs(eth_read(lp, MACHI_OFFSET)&MACHI_MACADDR_MASK);
+  uint32_t macaddr_lo = ntohl(eth_read(lp, MACLO_OFFSET));
+  memcpy (address_ptr+2, &macaddr_lo, sizeof(uint32_t));
+  memcpy (address_ptr+0, &macaddr_hi, sizeof(uint16_t));
+}
+
+/**
  * lowrisc_set_mac_address - Set the MAC address for this device
  * @dev:	Pointer to the network device instance
  * @addr:	Void pointer to the sockaddr structure
@@ -492,10 +508,11 @@ irqreturn_t lowrisc_ether_isr(int irq, void *dev_id)
   /* Check if there is Rx Data available */
   if (eth_read(lp, RSR_OFFSET) & RSR_RECV_DONE_MASK)
     {
+      int fcs = eth_read(lp, RFCS_OFFSET);
       int rplr = eth_read(lp, RPLR_OFFSET);
-      int len = rplr & RPLR_LENGTH_MASK; /* No FCS bytes */
+      int len = (rplr & RPLR_LENGTH_MASK) - 4; /* discard FCS bytes */
       rc = IRQ_HANDLED;
-      if ((len >= 14) && ((rplr & RPLR_FCS_ERROR_MASK) == 0) && (len <= ETH_FRAME_LEN + ETH_FCS_LEN + ALIGNMENT))
+      if ((len >= 14) && (fcs == 0xc704dd7b) && (len <= ETH_FRAME_LEN + ETH_FCS_LEN + ALIGNMENT))
 	{
 	  uint32_t *alloc;
 	  int rnd = (((len-1)|3)+1); /* round to a multiple of 4 */
@@ -668,7 +685,7 @@ static int lowrisc_send(struct sk_buff *new_skb, struct net_device *ndev)
           {
             eth_write(lp, TXBUFF_OFFSET+(i<<2), alloc[i]);
           }
-        eth_write(lp, TPLR_OFFSET,len);
+        eth_write(lp, TPLR_OFFSET, len);
 
 	spin_unlock(&lp->lock);
 
@@ -750,7 +767,7 @@ static int lowrisc_100MHz_probe(struct platform_device *ofdev)
         struct resource *lowrisc_ethernet = ofdev->resource;
 	unsigned char mac_address[7];
 	int rc = 0;
-        strcpy(mac_address, "\xee\xe1\xe2\xe3\xe4\xe5");
+
         lowrisc_ethernet = platform_get_resource(ofdev, IORESOURCE_MEM, 0);
 
 	/* Create an ethernet device instance */
@@ -770,6 +787,8 @@ static int lowrisc_100MHz_probe(struct platform_device *ofdev)
         
 	spin_lock_init(&lp->lock);
 
+        /* get the MAC address set by the boot loader */
+        lowrisc_read_mac_address(lp, mac_address);
 	memcpy(ndev->dev_addr, mac_address, ETH_ALEN);
 
 	/* Set the MAC address in the Ether100MHz device */

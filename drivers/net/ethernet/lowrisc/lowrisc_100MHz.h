@@ -10,9 +10,9 @@
 #define MACLO_OFFSET        0x0800          /* MAC address low 32-bits */
 #define MACHI_OFFSET        0x0804          /* MAC address high 16-bits and MAC ctrl */
 #define TPLR_OFFSET         0x0808          /* Tx packet length */
-#define OLD_TFCS_OFFSET     0x080C          /* Obsolete Tx frame check sequence register */
+#define TFCS_OFFSET         0x080C          /* Tx frame check sequence register */
 #define MDIOCTRL_OFFSET     0x0810          /* MDIO Control Register */
-#define OLD_RFCS_OFFSET     0x0814          /* Obsolete Rx frame check sequence register */
+#define RFCS_OFFSET         0x0814          /* Rx frame check sequence register */
 #define RSR_OFFSET          0x0818          /* Rx status and reset register */
 #define RPLR_OFFSET         0x081C          /* Rx packet length register */
 
