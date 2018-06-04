@@ -149,6 +149,7 @@ relocate:
 	j .Lsecondary_park
 END(_start)
 
+#ifdef CONFIG_SMP
 .section .text
 .global boot_sec_cpu
 
@@ -160,6 +161,7 @@ boot_sec_cpu:
 	fence
 
 	tail smp_callin
+#endif
 
 __PAGE_ALIGNED_BSS
 	/* Empty zero page */

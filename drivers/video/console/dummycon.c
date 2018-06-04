@@ -12,6 +12,11 @@
 #include <linux/screen_info.h>
 #include <linux/init.h>
 #include <linux/module.h>
+#include <linux/interrupt.h>
+#include <linux/platform_device.h>
+#include <linux/io.h>
+#include <asm/sbi.h>
+#include <asm/lowrisc.h>
 
 /*
  *  Dummy console driver
@@ -26,6 +31,9 @@
 #define DUMMY_ROWS	CONFIG_DUMMY_CONSOLE_ROWS
 #endif
 
+static int oldxpos, oldypos;
+static uint8_t *hid_vga_ptr;
+
 static const char *dummycon_startup(void)
 {
     return "dummy device";
@@ -33,27 +41,56 @@ static const char *dummycon_startup(void)
 
 static void dummycon_init(struct vc_data *vc, int init)
 {
-    vc->vc_can_do_color = 1;
+    vc->vc_can_do_color = 0;
     if (init) {
 	vc->vc_cols = DUMMY_COLUMNS;
 	vc->vc_rows = DUMMY_ROWS;
+	hid_vga_ptr = ioremap(vga_base_addr, 0x1000);
     } else
 	vc_resize(vc, DUMMY_COLUMNS, DUMMY_ROWS);
 }
 
 static void dummycon_deinit(struct vc_data *vc) { }
-static void dummycon_clear(struct vc_data *vc, int sy, int sx, int height,
-			   int width) { }
-static void dummycon_putc(struct vc_data *vc, int c, int ypos, int xpos) { }
-static void dummycon_putcs(struct vc_data *vc, const unsigned short *s,
-			   int count, int ypos, int xpos) { }
+
+static void dummycon_clear(struct vc_data *vc, int sy, int sx, int height, int width)
+{
+  oldxpos = 0;
+  oldypos = 0;
+  sbi_console_putchar('\f');
+}
+
+static void dummycon_putc(struct vc_data *vc, int c, int ypos, int xpos)
+{
+  if (xpos < oldxpos)
+    {
+      sbi_console_putchar('\r');
+    }
+  if (ypos > oldypos)
+    {
+      sbi_console_putchar('\n');
+    }
+  sbi_console_putchar(0x7f & c);
+  hid_vga_ptr[128*ypos+xpos] = c;
+  oldxpos = xpos;
+  oldypos = ypos;
+}
+
+static void dummycon_putcs(struct vc_data *vc, const unsigned short *s, int count, int ypos, int xpos)
+{
+  while (count--) dummycon_putc(vc, *s++, ypos, xpos++);
+}
+
 static void dummycon_cursor(struct vc_data *vc, int mode) { }
 
 static bool dummycon_scroll(struct vc_data *vc, unsigned int top,
 			    unsigned int bottom, enum con_scroll dir,
 			    unsigned int lines)
 {
-	return false;
+  oldxpos = 0;
+  oldypos = 0;
+  memcpy(hid_vga_ptr, hid_vga_ptr+128, 4096-128);
+  memset(hid_vga_ptr+4096-128, ' ', 128);
+  return true;
 }
 
 static int dummycon_switch(struct vc_data *vc)
