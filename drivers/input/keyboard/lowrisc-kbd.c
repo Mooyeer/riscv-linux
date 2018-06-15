@@ -19,8 +19,9 @@
 #include <linux/slab.h>
 #include <asm/io.h>
 #include <linux/uaccess.h>
-#include <asm/lowrisc.h>
 #include <asm/sbi.h>
+
+#define DRIVER_NAME "lowrisc-keyb"
 
 struct lowrisc_kbd {
   struct platform_device *pdev;
@@ -121,44 +122,22 @@ static int lowrisc_kbd_probe(struct platform_device *pdev)
   return 0;
 }
 
+static const struct of_device_id lowrisc_kbd_of_match[] = {
+	{ .compatible = "lowrisc-keyb" },
+	{ }
+};
+
+MODULE_DEVICE_TABLE(of, lowrisc_kbd_of_match);
+
 static struct platform_driver lowrisc_kbd_device_driver = {
 	.probe    = lowrisc_kbd_probe,
 	.driver   = {
-		.name = "lowrisc-kbd",
+		.name = "lowrisc-keyb",
+		.of_match_table = lowrisc_kbd_of_match,
 	},
 };
 module_platform_driver(lowrisc_kbd_device_driver);
 
-static struct resource lowrisc_keyboard[] = {
-        [0] = {
-          .start = keyb_base_addr,
-          .end   = keyb_base_addr+0xFFF,
-          .flags = IORESOURCE_MEM,
-        },
-        [1] = {
-          .name  = "kbd_irq",
-          .start = INTERRUPT_CAUSE_SOFTWARE,
-          .end   = INTERRUPT_CAUSE_SOFTWARE,
-          .flags = IORESOURCE_IRQ,
-        },
-};
-
-static struct platform_device lowrisc_keyboard_device = {
-                .name = "lowrisc-kbd",
-                .id = -1,
-                .num_resources = ARRAY_SIZE(lowrisc_keyboard),
-                .resource = lowrisc_keyboard,
-        };
-
-static int __init lowrisc_kbd_device_init(void)
-{
-  int ret;
-  ret = platform_device_register(&lowrisc_keyboard_device);
-  printk("platform_device_register(&lowrisc_keyboard_device) returned %d\n", ret);
-  return ret;
-}
-
-subsys_initcall_sync(lowrisc_kbd_device_init);
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Jonathan Kimmitt <jonathan@kimmitt.uk>");
 MODULE_DESCRIPTION("Keyboard driver for Lowrisc Keyboard Lowrisc_controller");

@@ -27,7 +27,9 @@
 #include <linux/timer.h>
 #include <linux/spinlock.h>
 
-struct lowrisc_sbi_con {
+#define DRIVER_NAME "lowrisc-uart"
+
+struct lowrisc_uart_con {
   struct platform_device *pdev;
   struct resource *keyb, *vid, *uart;
   spinlock_t lock;
@@ -35,15 +37,13 @@ struct lowrisc_sbi_con {
   volatile uint32_t *vid_base;
   volatile uint32_t *uart_base;
   void __iomem *ioaddr; /* mapped address */
-  int keyb_irq;
+  int irq;
   int int_en;
 };
 
 static DEFINE_SPINLOCK(xuart_tty_port_lock);
 static struct tty_port xuart_tty_port;
-static struct tty_driver *xuart_tty_driver;
 static volatile uint32_t xuart_ref_cnt;
-static int keyb_irq;
 
 void xuart_putchar(int data)
 {
@@ -67,7 +67,7 @@ static void xuart_tty_close(struct tty_struct *tty, struct file *filp)
       xuart_ref_cnt--;
 }
 
-static void xuart_console_poll(struct lowrisc_sbi_con *con)
+static void xuart_console_poll(struct lowrisc_uart_con *con)
 {
   int ch = sbi_console_getchar();
   if (ch && xuart_ref_cnt)
@@ -80,29 +80,14 @@ static void xuart_console_poll(struct lowrisc_sbi_con *con)
     }
 }
 
-static irqreturn_t xuart_console_irq(int irq, void *dev_id)
+static irqreturn_t lowrisc_uart_irq(int irq, void *dev_id)
 {
-  struct lowrisc_sbi_con *con = (struct lowrisc_sbi_con *)dev_id;
+  struct lowrisc_uart_con *con = (struct lowrisc_uart_con *)dev_id;
   irqreturn_t ret;
-  ret = IRQ_NONE;
+  xuart_console_poll(con);
+  ret = IRQ_HANDLED;
   return ret;
 }
-
-#if 0
-/* Timer callback */
-void timer_callback(struct timer_list *unused)
-{
-  sbi_console_puts("keyb_timer callback\n");
-  mod_timer(&keyb_timer, jiffies + 6); /* restarting timer */
-}
-
-/* Init the timer */
-static void keyb_init_timer(void)
-{
-    timer_setup(&keyb_timer, timer_callback, jiffies + 6); /* Starting the timer */ 
-    sbi_console_puts("keyb_timer is started");
-}
-#endif
 
 static int xuart_tty_write(struct tty_struct *tty,
 	const unsigned char *buf, int count)
@@ -127,64 +112,67 @@ static const struct tty_operations xuart_tty_ops = {
 	.write_room	= xuart_tty_write_room,
 };
 
-static int lowrisc_sbi_remove(struct platform_device *pdev)
+static int lowrisc_uart_remove(struct platform_device *pdev)
 {
   return 0;
 }
 
-static const struct of_device_id lowrisc_sbi_of_match[] = {
-  { .compatible = "riscv,lowrisc" },
+static const struct of_device_id lowrisc_uart_of_match[] = {
+  { .compatible = DRIVER_NAME },
   { }
 };
 
-MODULE_DEVICE_TABLE(of, lowrisc_sbi_of_match);
+MODULE_DEVICE_TABLE(of, lowrisc_uart_of_match);
 
-static int lowrisc_sbi_probe(struct platform_device *pdev)
+static int lowrisc_uart_probe(struct platform_device *pdev)
 {
-  struct lowrisc_sbi_con *con;
+  int ret = 0;
+  struct resource *iomem;
+  struct lowrisc_uart_con *con;
   printk("SBI console probe beginning\n");
-  con = kzalloc(sizeof(struct lowrisc_sbi_con), GFP_KERNEL);
+  iomem = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+  con = kzalloc(sizeof(struct lowrisc_uart_con), GFP_KERNEL);
   if (!con) {
     return -ENOMEM;
   }
+
+  con->pdev = pdev;
+  if (!request_mem_region(iomem->start, resource_size(iomem), DRIVER_NAME)) {
+    dev_err(&pdev->dev, "cannot request region\n");
+    return -EBUSY;
+  }
+
+  con->ioaddr = ioremap(iomem->start, resource_size(iomem));
+  if (!con->ioaddr) {
+    return -ENOMEM;
+  }
+  
+  printk(DRIVER_NAME " : Lowrisc uart platform driver (%llX-%llX) mapped to %lx\n",
+               iomem[0].start,
+               iomem[0].end,
+               (size_t)(con->ioaddr));
+        
+  con->irq = platform_get_irq(pdev, 0);
+  printk("Requesting interrupt %d\n", con->irq);
+
+  ret = request_irq(con->irq, lowrisc_uart_irq,
+				   IRQF_SHARED, DRIVER_NAME, con);
+  if (ret) return ret;
+  
   printk("SBI console probed and mapped\n");
   return 0;
 }
 
-static struct platform_driver lowrisc_sbi_driver = {
+static struct platform_driver lowrisc_uart_driver = {
   .driver = {
-    .name = "lowrisc_sbi_console",
-    .of_match_table = lowrisc_sbi_of_match,
+    .name = DRIVER_NAME,
+    .of_match_table = lowrisc_uart_of_match,
   },
-  .probe = lowrisc_sbi_probe,
-  .remove = lowrisc_sbi_remove,
+  .probe = lowrisc_uart_probe,
+  .remove = lowrisc_uart_remove,
 };
 
-module_platform_driver(lowrisc_sbi_driver);
-
-static struct resource lowrisc_hid[] = {
-};
-
-static struct platform_device xuart_device = {
-        .name = "lowrisc_sbi_console",
-        .id = -1, /* Bus number */
-        .num_resources = ARRAY_SIZE(lowrisc_hid),
-        .resource = lowrisc_hid,
-};
-
-static int __init xuart_console_init(void)
-{
-  return platform_device_register(&xuart_device);
-}
-
-static void __exit xuart_console_exit(void)
-{
-  tty_unregister_driver(xuart_tty_driver);
-  put_tty_driver(xuart_tty_driver);
-}
-
-module_init(xuart_console_init);
-module_exit(xuart_console_exit);
+module_platform_driver(lowrisc_uart_driver);
 
 MODULE_DESCRIPTION("RISC-V SBI console driver");
 MODULE_LICENSE("GPL");

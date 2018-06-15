@@ -18,8 +18,10 @@ echo "\
         find . | cpio -H newc -o > ../initramfs.cpio\
         " | fakeroot 
 cd ..
+scripts/dtc/dtc arch/riscv/kernel/lowrisc.dts -O dtb -o arch/riscv/kernel/lowrisc.dtb
+rm -f arch/riscv/kernel/head.o
 make ARCH=riscv -j 4
-rm ../rocket-chip/riscv-tools/riscv-pk/build/payload.o
+rm -f ../rocket-chip/riscv-tools/riscv-pk/build/payload.o
 make -C ../rocket-chip/riscv-tools/riscv-pk/build
 riscv64-unknown-elf-objdump -d -S -l vmlinux >vmlinux.dis
 riscv64-unknown-elf-objdump -d -l -S ../rocket-chip/riscv-tools/riscv-pk/build/bbl >../rocket-chip/riscv-tools/riscv-pk/build/bbl.dis

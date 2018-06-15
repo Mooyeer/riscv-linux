@@ -16,3 +16,5 @@ obj-$(CONFIG_OF_OVERLAY) += overlay.o
 obj-$(CONFIG_OF_NUMA) += of_numa.o
 
 obj-$(CONFIG_OF_UNITTEST) += unittest-data/
+
+CFLAGS_platform.o := -DDEBUG

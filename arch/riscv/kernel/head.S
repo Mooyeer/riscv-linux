@@ -45,6 +45,7 @@ ENTRY(_start)
 	bnez a3, .Lsecondary_start
 
 	/* Save hart ID and DTB physical address */
+	la a1, dtb
 	mv s0, a0
 	mv s1, a1
 
@@ -163,6 +164,10 @@ boot_sec_cpu:
 	tail smp_callin
 #endif
 
+dtb:
+	/* temporarily hack in modified device tree blob */
+	.incbin "arch/riscv/kernel/lowrisc.dtb"
+	
 __PAGE_ALIGNED_BSS
 	/* Empty zero page */
 	.balign PAGE_SIZE
