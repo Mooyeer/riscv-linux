@@ -99,13 +99,13 @@
                         reg-shift = <3>;
 			compatible = "lowrisc-keyb";
 		};
-		uart: lowrisc-uart@40034000 {
+		uart: lowrisc-fake@40034000 {
                         reg = <0x40034000 0x4000>;
                         interrupt-parent = <&L0>;
                         interrupts = <1>;
                         reg-io-width = <8>;
                         reg-shift = <3>;
-			compatible = "lowrisc-uart";
+			compatible = "lowrisc-fake";
 		};
 		vga: lowrisc-vga@40038000 {
                         reg = <0x40038000 0x4000>;
