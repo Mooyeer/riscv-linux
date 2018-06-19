@@ -62,8 +62,16 @@ static void lowrisc_keys_poll(struct input_polled_dev *dev)
   int ch = *rx;
   if (0x200 & ~ch)
     {
+      enum {lctrl=0x1d, lshift=0x2a};
+      int ctrl;
       rx[0x200] = 0; // pop FIFO
       ch = *rx & 0x7f;
+      ctrl = ch >= 1 && ch <= 26;
+      if (ctrl)
+	{
+	  input_report_key(input, lctrl, 1);
+          ch = ch + 'a' - 1; // Convert ctrl-key back to normal key
+	}      
       switch(ch)
 	{
 	case '\e' : c =  	  0x01; break;
@@ -122,13 +130,17 @@ static void lowrisc_keys_poll(struct input_polled_dev *dev)
 	}
       if (upper(ch))
 	{
-	  input_report_key(input, 0x2a, 1);
+	  input_report_key(input, lshift, 1);
 	}
       input_report_key(input, c, 1);
       input_report_key(input, c, 0);
+      if (ctrl)
+	{
+	  input_report_key(input, lctrl, 0);
+	}
       if (upper(ch))
 	{
-	  input_report_key(input, 0x2a, 0);
+	  input_report_key(input, lshift, 0);
 	}
       input_sync(input);
     }

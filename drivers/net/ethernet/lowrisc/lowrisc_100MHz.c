@@ -58,10 +58,6 @@
 #define XEL_HEADER_IP_LENGTH_OFFSET	16	/* IP Length Offset */
 
 #define TX_TIMEOUT		(60*HZ)		/* Tx timeout is 60 seconds. */
-#define ALIGNMENT		4
-
-/* BUFFER_ALIGN(adr) calculates the number of bytes to the next alignment. */
-#define BUFFER_ALIGN(adr) ((ALIGNMENT - ((size_t) adr)) % ALIGNMENT)
 
 /**
  * struct net_local - Our private per device data
@@ -88,32 +84,74 @@ struct net_local {
   uint16_t mdio_regs_cache[32];
 
   struct delayed_work     task;
+  int irq;
 };
 
 static struct workqueue_struct *lowrisc_wq;
 
 static void inline eth_write(struct net_local *lp, size_t addr, int data)
 {
-  volatile unsigned int *eth_base = (volatile unsigned int *)(lp->ioaddr);
-  eth_base[addr >> 2] = data;
+  volatile uint64_t *eth_base = (volatile uint64_t *)(lp->ioaddr);
+  eth_base[addr >> 3] = data;
+}
+
+static void inline eth_copyout(struct net_local *lp, uint8_t *data, int len)
+{
+  int i, rnd = ((len-1)|7)+1;
+  volatile uint64_t *eth_base = (volatile uint64_t *)(lp->ioaddr);
+  if (!(((size_t)data) & 7))
+    {
+      uint64_t *ptr = (uint64_t *)data;
+      for (i = 0; i < rnd/8; i++)
+        eth_base[TXBUFF_OFFSET/8 + i] = ptr[i];
+    }
+  else // We can't unfortunately rely on the skb being word aligned
+    {
+      uint64_t notptr;
+      for (i = 0; i < rnd/8; i++)
+        {
+          memcpy(&notptr, data+(i<<3), sizeof(uint64_t));
+          eth_base[TXBUFF_OFFSET/8 + i] = notptr;
+        }
+    }
 }
 
 static volatile inline int eth_read(struct net_local *lp, size_t addr)
 {
-  volatile unsigned int *eth_base = (volatile unsigned int *)(lp->ioaddr);
-  return eth_base[addr >> 2];
+  volatile uint64_t *eth_base = (volatile uint64_t *)(lp->ioaddr);
+  return eth_base[addr >> 3];
+}
+
+static inline void eth_copyin(struct net_local *lp, uint8_t *data, int len)
+{
+  int i, rnd = ((len-1)|7)+1;
+  volatile uint64_t *eth_base = (volatile uint64_t *)(lp->ioaddr);
+  if (!(((size_t)data) & 7))
+    {
+      uint64_t *ptr = (uint64_t *)data;
+      for (i = 0; i < rnd/8; i++)
+        ptr[i] = eth_base[RXBUFF_OFFSET/8 + i];
+    }
+  else // We can't unfortunately rely on the skb being word aligned
+    {
+      for (i = 0; i < rnd/8; i++)
+        {
+          uint64_t notptr = eth_base[RXBUFF_OFFSET/8 + i];
+          memcpy(data+(i<<3), &notptr, sizeof(uint64_t));
+        }
+    }
 }
 
 static void inline eth_enable_irq(struct net_local *lp)
 {
-  volatile unsigned int *eth_base = (volatile unsigned int *)(lp->ioaddr);
-  eth_base[MACHI_OFFSET >> 2] |= MACHI_IRQ_EN;
+  volatile uint64_t *eth_base = (volatile uint64_t *)(lp->ioaddr);
+  eth_base[MACHI_OFFSET >> 3] |= MACHI_IRQ_EN;
 }
 
 static void inline eth_disable_irq(struct net_local *lp)
 {
-  volatile unsigned int *eth_base = (volatile unsigned int *)(lp->ioaddr);
-  eth_base[MACHI_OFFSET >> 2] &= ~MACHI_IRQ_EN;
+  volatile uint64_t *eth_base = (volatile uint64_t *)(lp->ioaddr);
+  eth_base[MACHI_OFFSET >> 3] &= ~MACHI_IRQ_EN;
 }
 
 /**
@@ -528,11 +566,10 @@ irqreturn_t lowrisc_ether_isr(int irq, void *dev_id)
       int rplr = eth_read(lp, RPLR_OFFSET);
       int len = (rplr & RPLR_LENGTH_MASK) - 4; /* discard FCS bytes */
       rc = IRQ_HANDLED;
-      if ((len >= 14) && (fcs == 0xc704dd7b) && (len <= ETH_FRAME_LEN + ETH_FCS_LEN + ALIGNMENT))
+      if ((len >= 14) && (fcs == 0xc704dd7b) && (len <= ETH_FRAME_LEN + ETH_FCS_LEN))
 	{
-	  uint32_t *alloc;
-	  int rnd = (((len-1)|3)+1); /* round to a multiple of 4 */
-	  struct sk_buff *skb = netdev_alloc_skb(ndev, rnd + ALIGNMENT);
+	  int rnd = ((len-1)|7)+1; /* round to a multiple of 8 */
+	  struct sk_buff *skb = netdev_alloc_skb(ndev, rnd);
 	  if (!skb)
 	    {
 	      /* Couldn't get memory. */
@@ -541,22 +578,17 @@ irqreturn_t lowrisc_ether_isr(int irq, void *dev_id)
 	    }
 	  else
 	    {
-	      /*
-	       * A new skb should have the data halfword aligned, but this code is
-	       * here just in case that isn't true. Calculate how many
-	       * bytes we should reserve to get the data to start on a word
-	       * boundary */
-	      unsigned int i, align = BUFFER_ALIGN(skb->data);
-	      if (align)
-		skb_reserve(skb, align);
-	      skb_reserve(skb, 2);
+              int i;
+              uint8_t *alloc;
+              char fmt[64] = "";
+	      skb_reserve(skb, NET_IP_ALIGN);
 	      
-              alloc = (uint32_t *)(skb->data);
-              for (i = 0; i < rnd/4; i++)
-                {
-                  alloc[i] = eth_read(lp, RXBUFF_OFFSET+(i<<2));
-                }
+              alloc = (uint8_t *)(skb->data);
+              eth_copyin(lp, alloc, len);
               skb_put(skb, len);	/* Tell the skb how much data we got */
+
+              for (i = 0; i < 16; i++) sprintf(fmt+strlen(fmt), " %.2x", alloc[i]);
+              pr_debug("lowrisc_recv(%s ..., %d);\n", fmt, len);
               
               skb->protocol = eth_type_trans(skb, ndev);
               skb_checksum_none_assert(skb);
@@ -623,7 +655,7 @@ static void lowrisc_get_regs(struct net_device *ndev,
   for (i = 0; i < LOWRISC_REGS_LEN; i++)
     {
       if (i >= 32)
-	regs_buff[i] = eth_read(lp, MACLO_OFFSET+((i-32)<<2));
+	regs_buff[i] = eth_read(lp, MACLO_OFFSET+((i-32)<<3));
       else
 	{
 	lowrisc_read_phy_reg(phy, i, &phy_data);
@@ -666,8 +698,8 @@ static int lowrisc_open(struct net_device *ndev)
   }
   
   /* Grab the IRQ */
-  printk("Open device, request interrupt\n");
-  retval = request_irq(INTERRUPT_CAUSE_SOFTWARE, lowrisc_ether_isr, IRQF_SHARED, ndev->name, ndev);
+  printk("Open device, request interrupt %d\n", lp->irq);
+  retval = request_irq(lp->irq, lowrisc_ether_isr, IRQF_SHARED, ndev->name, ndev);
   if (retval) {
     dev_err(&lp->ndev->dev, "Could not allocate interrupt %d\n", INTERRUPT_CAUSE_SOFTWARE);
     if (lp->phy_dev)
@@ -702,21 +734,19 @@ static int lowrisc_send(struct sk_buff *new_skb, struct net_device *ndev)
 {
 	struct net_local *lp = netdev_priv(ndev);
 	unsigned int len = new_skb->len;
-        uint32_t *alloc = (uint32_t *)new_skb->data;
+        uint8_t *alloc = (uint8_t *)(new_skb->data);
         int i, rslt;
-
+        char fmt[64] = "";
 	spin_lock(&lp->lock);
         rslt = eth_read(lp, TPLR_OFFSET);
         if (rslt & TPLR_BUSY_MASK)
           printk("TX Busy Status = %x, len = %d, ignoring\n", rslt, len);
-        for (i = 0; i < (((len-1)|3)+1)/4; i++)
-          {
-            eth_write(lp, TXBUFF_OFFSET+(i<<2), alloc[i]);
-          }
+        eth_copyout(lp, new_skb->data, len);
         eth_write(lp, TPLR_OFFSET, len);
-
 	spin_unlock(&lp->lock);
 
+        for (i = 0; i < 16; i++) sprintf(fmt+strlen(fmt), " %.2x", alloc[i]);
+        pr_debug("lowrisc_send(%s ..., %d);\n", fmt, len);
 	skb_tx_timestamp(new_skb);
 
 	ndev->stats.tx_bytes += len;
@@ -792,7 +822,7 @@ static int lowrisc_100MHz_probe(struct platform_device *ofdev)
 	struct net_device *ndev = NULL;
 	struct net_local *lp = NULL;
 	struct device *dev = &ofdev->dev;
-        struct resource *lowrisc_ethernet = ofdev->resource;
+        struct resource *lowrisc_ethernet;
 	unsigned char mac_address[7];
 	int rc = 0;
 
@@ -814,6 +844,8 @@ static int lowrisc_100MHz_probe(struct platform_device *ofdev)
                lowrisc_ethernet[0].start,
                lowrisc_ethernet[0].end,
                (size_t)(lp->ioaddr));
+
+        lp->irq = platform_get_irq(ofdev, 0);
         
 	spin_lock_init(&lp->lock);
 
