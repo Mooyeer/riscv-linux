@@ -49,6 +49,7 @@ static int upper(int ch)
     case '{' : return 1;
     case '}' : return 1;
     case '|' : return 1;
+    case ':' : return 1;
     default  : return 0;
     }
 }
