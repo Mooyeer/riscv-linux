@@ -97,3 +97,7 @@ endif
 
 obj-$(CONFIG_MMC_SDHCI_XENON)	+= sdhci-xenon-driver.o
 sdhci-xenon-driver-y		+= sdhci-xenon.o sdhci-xenon-phy.o
+
+ifeq ($(CONFIG_MMC_DEBUG),y)
+	CFLAGS-lowrisc_sd	+= -DDEBUG
+endif

@@ -27,7 +27,7 @@
 			reg = <0>;
 			riscv,isa = "rv64imafdc";
 			status = "okay";
-			timebase-frequency = <1000000>;
+			timebase-frequency = <250000>;
 			tlb-split;
 			L3: interrupt-controller {
 				#interrupt-cells = <1>;
