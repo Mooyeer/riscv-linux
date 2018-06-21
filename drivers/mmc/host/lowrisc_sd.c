@@ -250,12 +250,8 @@ LOGV (("Command IRQ complete %d %d %x\n", cmd->opcode, cmd->error, cmd->flags));
 static void lowrisc_sd_data_end_irq(struct lowrisc_sd_host *host)
 {
 	struct mmc_data *data = host->data;
-        volatile uint32_t *sd_mem = (volatile uint32_t *) (0x8000 + (size_t)(host->ioaddr));
+        volatile uint64_t *sd_base = host->ioaddr;
 	unsigned long flags;
-	size_t blksize, len, chunk;
-	u32 uninitialized_var(scratch);
-	u8 *buf;
-	int i = 0;
 	
 	LOGV (("lowrisc_sd_data_end_irq\n"));
 
@@ -268,36 +264,25 @@ static void lowrisc_sd_data_end_irq(struct lowrisc_sd_host *host)
 
         if (data->flags & MMC_DATA_READ)
 	  {
-        
-	    blksize = data->blksz;
-	    chunk = 0;
+            int len, i = 0x1000;
+            u8 *buf;        
+	    size_t blksize = data->blksz;
 
 	    local_irq_save(flags);
 
-	    while (blksize) {
-	      int idx = 0;
-	      BUG_ON(!sg_miter_next(&host->sg_miter));
+            BUG_ON(!sg_miter_next(&host->sg_miter));
+            BUG_ON(host->sg_miter.length < blksize);
 	  
-	      len = min(host->sg_miter.length, blksize);
+            host->sg_miter.consumed = blksize;
 	  
-	      blksize -= len;
-	      host->sg_miter.consumed = len;
+            buf = host->sg_miter.addr;
 	  
-	      buf = host->sg_miter.addr;
-	  
-	      while (len) {
-		if (chunk == 0) {
-		  scratch = __be32_to_cpu(sd_mem[i++]);
-		  chunk = 4;
-		}
-		
-		buf[idx] = scratch & 0xFF;	    
-		idx++;
-		scratch >>= 8;
-		chunk--;
-		len--;
-	      }
-	    }
+            for (len = blksize; len >= 0; len -= sizeof(u64)) {
+              u64 scratch = sd_base[i++];
+              memcpy(buf, &scratch, sizeof(u64));
+              buf += sizeof(u64);
+            }
+
 	    sg_miter_stop(&host->sg_miter);
 
 	    local_irq_restore(flags);
@@ -501,43 +486,27 @@ static void lowrisc_sd_start_data(struct lowrisc_sd_host *host, struct mmc_data 
 
         if (!(data->flags & MMC_DATA_READ))
 	  {
-            volatile uint32_t *sd_mem = (volatile uint32_t *) (0x8000 + (size_t)(host->ioaddr));
-	struct mmc_data *data = host->data;
-	if (sg_miter_next(&host->sg_miter))
-{
-  size_t blksize, len, chunk;
-  u32 scratch, i = 0;
-  u8 *buf;
-  LOGV (("count: %08x, flags %08x\n", data->blksz, data->flags));
-
-	blksize = data->blksz;
-	chunk = 0;
-	scratch = 0;
-
-	len = min(host->sg_miter.length, blksize);
-
-	blksize -= len;
-	host->sg_miter.consumed = len;
-
-	buf = host->sg_miter.addr;
-
-	while (len) {
-			scratch |= (u32)*buf << (chunk * 8);
-
-			buf++;
-			chunk++;
-			len--;
-
-			if ((chunk == 4) || ((len == 0) && (blksize == 0))) {
-			  sd_mem[i++] = __cpu_to_be32(scratch);
-				chunk = 0;
-				scratch = 0;
-			}
-	}
-
-	sg_miter_stop(&host->sg_miter);
-	  }
-        }
+            volatile uint64_t *sd_base = host->ioaddr;
+            struct mmc_data *data = host->data;
+            if (sg_miter_next(&host->sg_miter))
+              {
+                int len, i = 0x1000;
+                size_t blksize = data->blksz;
+                u8 *buf = host->sg_miter.addr;
+                BUG_ON(host->sg_miter.length < blksize);
+                host->sg_miter.consumed = blksize;
+                LOGV (("count: %08x, flags %08x\n", data->blksz, data->flags));
+                
+                for (len = blksize; len >= 0; len -= 8)
+                  {
+                    u64 scratch;
+                    memcpy(&scratch, buf, sizeof(u64));
+                    sd_base[i++] = scratch;
+                  }
+                
+                sg_miter_stop(&host->sg_miter);
+              }
+          }
 }
 
 /* Process requests from the MMC layer */
