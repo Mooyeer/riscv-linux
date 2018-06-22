@@ -284,8 +284,6 @@ static void lowrisc_remove_ndev(struct net_device *ndev)
 
 #ifndef CONFIG_LOWRISC_BITBANG
 
-static int cnt = 0;
-
 static int lowrisc_mii_read(struct mii_bus *bus, int phyaddr, int regidx)
 {
 	struct net_local *lp = (struct net_local *)bus->priv;
@@ -295,8 +293,7 @@ static int lowrisc_mii_read(struct mii_bus *bus, int phyaddr, int regidx)
 
 	reg = lp->mdio_regs_cache[regidx];
 
-        if (++cnt < 20)
-          printk("lowrisc_mii_read(%x,%x,%x);\n", phyaddr, regidx, reg);
+	pr_debug("lowrisc_mii_read(%x,%x,%x);\n", phyaddr, regidx, reg);
         
 	spin_unlock(&lp->lock);
 	return reg;
@@ -312,8 +309,7 @@ static int lowrisc_mii_write(struct mii_bus *bus, int phyaddr, int regidx,
 	if (regidx)
           lp->mdio_regs_cache[regidx] = val;
 
-        if (++cnt < 20)
-          printk("lowrisc_mii_write(%x,%x,%x);\n", phyaddr, regidx, val);
+	pr_debug("lowrisc_mii_write(%x,%x,%x);\n", phyaddr, regidx, val);
         
 	spin_unlock(&lp->lock);
 
@@ -569,7 +565,7 @@ irqreturn_t lowrisc_ether_isr(int irq, void *dev_id)
       if ((len >= 14) && (fcs == 0xc704dd7b) && (len <= ETH_FRAME_LEN + ETH_FCS_LEN))
 	{
 	  int rnd = ((len-1)|7)+1; /* round to a multiple of 8 */
-	  struct sk_buff *skb = netdev_alloc_skb(ndev, rnd);
+	  struct sk_buff *skb = netdev_alloc_skb(ndev, rnd + NET_IP_ALIGN);
 	  if (!skb)
 	    {
 	      /* Couldn't get memory. */

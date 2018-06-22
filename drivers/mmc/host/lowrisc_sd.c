@@ -1,10 +1,11 @@
 /*
  *  LowRISC Secure Digital Host Controller Interface driver
  *
- *  Based on toshsd.c
+ *  Copyright (C) 2018 LowRISC CIC
  *
- *  Copyright (C) 2014 Ondrej Zary
- *  Copyright (C) 2007 Richard Betts, All Rights Reserved.
+ *    Based on toshsd.c
+ *    Copyright (C) 2014 Ondrej Zary
+ *    Copyright (C) 2007 Richard Betts, All Rights Reserved.
  *
  *	Based on asic3_mmc.c, copyright (c) 2005 SDG Systems, LLC and,
  *	sdhci.c, copyright (C) 2005-2006 Pierre Ossman
@@ -200,7 +201,6 @@ LOGV (("Command IRQ complete %d %d %x\n", cmd->opcode, cmd->error, cmd->flags));
 static void lowrisc_sd_data_end_irq(struct lowrisc_sd_host *host)
 {
 	struct mmc_data *data = host->data;
-        volatile uint64_t *sd_base = host->ioaddr;
 	unsigned long flags;
 	
 	LOGV (("lowrisc_sd_data_end_irq\n"));
@@ -214,8 +214,8 @@ static void lowrisc_sd_data_end_irq(struct lowrisc_sd_host *host)
 
         if (data->flags & MMC_DATA_READ)
 	  {
-            int len, i = 0x1000;
-            u8 *buf;        
+            volatile uint64_t *sd_base = 0x1000 + (volatile uint64_t *)(host->ioaddr);
+            int len;
 	    size_t blksize = data->blksz;
 
 	    local_irq_save(flags);
@@ -223,15 +223,24 @@ static void lowrisc_sd_data_end_irq(struct lowrisc_sd_host *host)
             BUG_ON(!sg_miter_next(&host->sg_miter));
             BUG_ON(host->sg_miter.length < blksize);
 	  	  
-            buf = host->sg_miter.addr;
-	  
-            for (len = blksize; len > 0; len -= sizeof(u64)) {
-              u64 scratch = sd_base[i++];
-              memcpy(buf, &scratch, sizeof(u64));
-              buf += sizeof(u64);
-            }
-	    mb();
-	    
+	    if (!((sizeof(u64)-1) & (size_t)(host->sg_miter.addr))) // optimise case for aligned buffer
+	      {
+		u64 *buf = (u64 *)(host->sg_miter.addr);
+		for (len = blksize; len > 0; len -= sizeof(u64))
+		  {
+		  *buf++ = *sd_base++;
+		  }
+	      }
+	    else
+	      {
+		u8 *buf = host->sg_miter.addr;
+		for (len = blksize; len > 0; len -= sizeof(u64))
+		  {
+		  u64 scratch = *sd_base++;
+		  memcpy(buf, &scratch, sizeof(u64));
+		  buf += sizeof(u64);
+		  }
+	      }
             host->sg_miter.consumed = blksize;
 	    sg_miter_stop(&host->sg_miter);
 
@@ -436,24 +445,32 @@ static void lowrisc_sd_start_data(struct lowrisc_sd_host *host, struct mmc_data 
 
         if (!(data->flags & MMC_DATA_READ))
 	  {
-            volatile uint64_t *sd_base = host->ioaddr;
+            volatile uint64_t *sd_base = 0x1000 + (volatile uint64_t *)(host->ioaddr);
             struct mmc_data *data = host->data;
             if (sg_miter_next(&host->sg_miter))
               {
-                int len, i = 0x1000;
+                int len;
                 size_t blksize = data->blksz;
-                u8 *buf = host->sg_miter.addr;
                 BUG_ON(host->sg_miter.length < blksize);
-                
-                for (len = blksize; len > 0; len -= 8)
-                  {
-                    u64 scratch;
-                    memcpy(0+(char *)&scratch, buf+sizeof(u32), sizeof(u32));
-                    memcpy(sizeof(u32)+(char *)&scratch, buf, sizeof(u32));
-                    sd_base[i++] = scratch;
-                  }
-		mb();
-                
+		if (!((sizeof(u64)-1) & (size_t)(host->sg_miter.addr))) // optimise case for aligned buffer
+		  {
+		    u64 *buf = (u64 *)(host->sg_miter.addr);
+		    for (len = blksize; len > 0; len -= sizeof(u64))
+		      {
+			*sd_base++ = *buf++;
+		      }
+		  }
+		else
+		  {
+		    u8 *buf = host->sg_miter.addr;
+		    for (len = blksize; len > 0; len -= sizeof(u64))
+		      {
+			u64 scratch;
+			memcpy(&scratch, buf, sizeof(u64));
+			buf += sizeof(u64);
+			*sd_base++ = scratch;
+		      }
+		  }
                 host->sg_miter.consumed = blksize;
                 sg_miter_stop(&host->sg_miter);
               }
@@ -637,6 +654,6 @@ static struct platform_driver lowrisc_sd_driver = {
 
 module_platform_driver(lowrisc_sd_driver);
 
-MODULE_AUTHOR("Ondrej Zary, Richard Betts, Jonathan Kimmitt");
+MODULE_AUTHOR("Jonathan Kimmitt");
 MODULE_DESCRIPTION("LowRISC Secure Digital Host Controller Interface driver");
 MODULE_LICENSE("GPL");
