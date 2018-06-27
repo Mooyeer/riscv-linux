@@ -34,22 +34,27 @@ struct lowrisc_fake {
 static int upper(int ch)
 {
   if ( ch >= 'A' && ch <= 'Z' ) return 1;
-  if ( ch >= '!' && ch <= ')' ) return 1;
   switch ( ch )
     {
+    case '!' : return 1;
+    case '"' : return 1;
+    case '#' : return 1;
+    case '$' : return 1;
+    case '%' : return 1;
+    case '^' : return 1;
+    case '&' : return 1;
+    case '*' : return 1;
     case '<' : return 1;
     case '>' : return 1;
-    case '?' : return 1;
     case '~' : return 1;
     case '@' : return 1;
     case '+' : return 1;
     case '_' : return 1;
-    case '^' : return 1;
-    case '*' : return 1;
     case '{' : return 1;
     case '}' : return 1;
     case '|' : return 1;
     case ':' : return 1;
+    case '?' : return 1;
     default  : return 0;
     }
 }

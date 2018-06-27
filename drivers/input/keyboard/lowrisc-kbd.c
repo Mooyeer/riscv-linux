@@ -32,23 +32,27 @@ struct lowrisc_kbd {
   unsigned short keycodes[128];
 };
 
+const struct { char scan,lwr,upr; } scancode[] = {
+#include "lowrisc-scancode.h"
+};
+
 static void lowrisc_keys_poll(struct input_polled_dev *dev)
 {
   struct lowrisc_kbd *lowrisc_kbd = dev->private;
   struct input_dev *input = dev->input;
   unsigned char c;
   uint32_t key = *lowrisc_kbd->keyb_base;
-  if ((1<<16) & ~key)
+  if ((1<<9) & ~key)
     {
       *lowrisc_kbd->keyb_base = 0; // bump FIFO location
-      key = *lowrisc_kbd->keyb_base;
-      c = key & 0x7F; /* strip off the scan code (default ascii code is UK) */
-      input_report_key(input, c, 1);
-      input_sync(input);
-      input_report_key(input, c, 0);
-      input_sync(input);
-      //      printk("input_report_key %x entered as %c\n", c, key >> 8);
-      //      sbi_console_putchar(key >> 8);
+      key = *lowrisc_kbd->keyb_base & ~0x200;
+      c = scancode[key&~0x100].scan; /* convert to standard AT keyboard codes */
+      if (c != 0x3A) // Ignore caps lock for now (and hopefully always)
+        {
+          input_report_key(input, c, key & 0x100 ? 0 : 1);
+          input_sync(input);
+        }
+      pr_debug("input event key %c\n", scancode[key&~0x100].lwr);
     }
 }
 
@@ -118,7 +122,12 @@ static int lowrisc_kbd_probe(struct platform_device *pdev)
     dev_err(dev, "Unable to register input device: %d\n", error);
     return error;
   }
- 
+  printk("Clear any pending input\n");
+  while ((1<<9) & ~*lowrisc_kbd->keyb_base)
+    {
+      *lowrisc_kbd->keyb_base = 0; // bump FIFO location
+    }
+  printk("Loading keyboard input device returns success\n");  
   return 0;
 }
 
