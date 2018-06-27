@@ -26,7 +26,7 @@
 #define LOWRISC_ROWS	32
 
 static int oldxpos, oldypos;
-static uint8_t *hid_vga_ptr;
+static uint16_t *hid_vga_ptr;
 
 static const char *lowrisc_con_startup(void)
 {
@@ -35,7 +35,7 @@ static const char *lowrisc_con_startup(void)
 
 static void lowrisc_con_init(struct vc_data *vc, int init)
 {
-    vc->vc_can_do_color = 0;
+    vc->vc_can_do_color = 1;
     if (init) {
 	vc->vc_cols = LOWRISC_COLUMNS;
 	vc->vc_rows = LOWRISC_ROWS;
