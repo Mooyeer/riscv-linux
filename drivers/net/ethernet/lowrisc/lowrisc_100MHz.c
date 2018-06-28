@@ -82,12 +82,8 @@ struct net_local {
   /* Spinlock */
   spinlock_t lock;
   uint16_t mdio_regs_cache[32];
-
-  struct delayed_work     task;
   int irq;
 };
-
-static struct workqueue_struct *lowrisc_wq;
 
 static void inline eth_write(struct net_local *lp, size_t addr, int data)
 {
@@ -255,16 +251,13 @@ static int lowrisc_close(struct net_device *ndev)
 
 	netif_stop_queue(ndev);
 	eth_disable_irq(lp);
-	free_irq(INTERRUPT_CAUSE_SOFTWARE, ndev);
+	free_irq(lp->irq, ndev);
         printk("Close device, free interrupt\n");
         
 	if (lp->phy_dev)
 		phy_disconnect(lp->phy_dev);
 	lp->phy_dev = NULL;
 
-        cancel_delayed_work(&lp->task);
-        flush_workqueue(lowrisc_wq);
-        
 	return 0;
 }
 
@@ -662,17 +655,6 @@ static const struct ethtool_ops lowrisc_ethtool_ops = {
 	.get_regs		= lowrisc_get_regs
 };
 
-static void delayed_task(struct work_struct *work)
-{
-  struct net_local *lp;
-  struct net_device *ndev;
-  lp = container_of(work, struct net_local, task.work);
-  ndev = lp->ndev;
-  /* first call to handler enables the irq */
-  lowrisc_ether_isr(INTERRUPT_CAUSE_SOFTWARE, ndev);
-  queue_delayed_work(lowrisc_wq, &lp->task, msecs_to_jiffies(100));
-}
-
 static int lowrisc_open(struct net_device *ndev)
 {
   int retval;
@@ -707,9 +689,8 @@ static int lowrisc_open(struct net_device *ndev)
   /* We're ready to go */
   netif_start_queue(ndev);
 
-  INIT_DELAYED_WORK(&lp->task, delayed_task);
-  queue_delayed_work(lowrisc_wq, &lp->task, 1);
-
+  /* first call to handler enables the irq */
+  lowrisc_ether_isr(lp->irq, ndev);
   return 0;
 }
 
@@ -858,12 +839,6 @@ static int lowrisc_100MHz_probe(struct platform_device *ofdev)
                   "Cannot register network device, aborting\n");
           goto error;
 	}
-
-        lowrisc_wq = create_singlethread_workqueue("lowrisc_net_wq");
-        if (!lowrisc_wq) {
-          rc = -ENOMEM;
-          goto error;
-        }
 
 	dev_info(dev, "Lowrisc Ether100MHz registered\n");
 	
