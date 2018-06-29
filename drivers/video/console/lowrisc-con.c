@@ -13,7 +13,7 @@
 #include <linux/module.h>
 #include <linux/interrupt.h>
 #include <linux/platform_device.h>
-#include <linux/io.h>
+#include <linux/serial_core.h>
 #include <asm/sbi.h>
 
 #define DRIVER_NAME     "lowrisc-vga"
@@ -22,11 +22,27 @@
  *  Lowrisc console driver
  */
 
+#define LOWRISC_MEM	4096
 #define LOWRISC_COLUMNS	128
-#define LOWRISC_ROWS	32
+#define LOWRISC_ROWS	31
 
-static int oldxpos, oldypos;
 static uint16_t *hid_vga_ptr;
+
+static void mymove(uint16_t *dest, const uint16_t *src, size_t n)
+{
+  if (dest < hid_vga_ptr || dest+n > hid_vga_ptr+LOWRISC_MEM || src < hid_vga_ptr || src+n > hid_vga_ptr+LOWRISC_MEM)
+    printk("out of range scroll move %lx\n", (long)dest);
+  else
+    memmove(dest, src, n*sizeof(u16));
+}
+
+static void myset(uint16_t *dest, int c, size_t n)
+{
+  if (dest < hid_vga_ptr || dest+n > hid_vga_ptr+LOWRISC_MEM)
+    printk("out of range scroll set %lx\n", (long)dest);
+  else
+    memset(dest, c, n);
+}
 
 static const char *lowrisc_con_startup(void)
 {
@@ -47,25 +63,11 @@ static void lowrisc_con_deinit(struct vc_data *vc) { }
 
 static void lowrisc_con_clear(struct vc_data *vc, int sy, int sx, int height, int width)
 {
-  oldxpos = 0;
-  oldypos = 0;
-  sbi_console_putchar('\f');
 }
 
 static void lowrisc_con_putc(struct vc_data *vc, int c, int ypos, int xpos)
 {
-  if (xpos < oldxpos)
-    {
-      sbi_console_putchar('\r');
-    }
-  if (ypos > oldypos)
-    {
-      sbi_console_putchar('\n');
-    }
-  sbi_console_putchar(0x7f & c);
-  hid_vga_ptr[128*ypos+xpos] = c;
-  oldxpos = xpos;
-  oldypos = ypos;
+  hid_vga_ptr[LOWRISC_COLUMNS*ypos+xpos] = c;
 }
 
 static void lowrisc_con_putcs(struct vc_data *vc, const unsigned short *s, int count, int ypos, int xpos)
@@ -76,14 +78,39 @@ static void lowrisc_con_putcs(struct vc_data *vc, const unsigned short *s, int c
 static void lowrisc_con_cursor(struct vc_data *vc, int mode) { }
 
 static bool lowrisc_con_scroll(struct vc_data *vc, unsigned int top,
-			    unsigned int bottom, enum con_scroll dir,
-			    unsigned int lines)
+                           unsigned int bottom, enum con_scroll dir,
+                           unsigned int lines)
 {
-  oldxpos = 0;
-  oldypos = 0;
-  memcpy(hid_vga_ptr, hid_vga_ptr+128, 4096-128);
-  memset(hid_vga_ptr+4096-128, ' ', 128);
+#if 0
+  if (lines <= 0)
+    return false;
+
+  if (lines > LOWRISC_ROWS)   /* maximum realistic size */
+    lines = LOWRISC_ROWS;
+
+  switch (dir)
+    {
+
+    case SM_UP:
+      mymove(hid_vga_ptr+top*LOWRISC_COLUMNS, hid_vga_ptr+(top+lines)*LOWRISC_COLUMNS, LOWRISC_MEM-(bottom-top-lines)*LOWRISC_COLUMNS);
+      myset(hid_vga_ptr+(bottom-lines)*LOWRISC_COLUMNS, 0, lines*LOWRISC_COLUMNS);
+      break;
+
+    case SM_DOWN:
+      mymove(hid_vga_ptr+(top+lines)*LOWRISC_COLUMNS, hid_vga_ptr+top*LOWRISC_COLUMNS, LOWRISC_MEM-(bottom-top-lines)*LOWRISC_COLUMNS);
+      myset(hid_vga_ptr+top*LOWRISC_COLUMNS, 0, lines*LOWRISC_COLUMNS);
+      break;
+    }
+
   return true;
+
+#else
+
+  mymove(hid_vga_ptr, hid_vga_ptr+LOWRISC_COLUMNS, LOWRISC_MEM-LOWRISC_COLUMNS);
+  myset(hid_vga_ptr+LOWRISC_MEM-LOWRISC_COLUMNS, 0, LOWRISC_COLUMNS);
+  return true;
+
+#endif        
 }
 
 static int lowrisc_con_switch(struct vc_data *vc)
@@ -128,7 +155,7 @@ const struct consw lowrisc_con = {
 	.con_putc =		lowrisc_con_putc,
 	.con_putcs =	lowrisc_con_putcs,
 	.con_cursor =	lowrisc_con_cursor,
-	.con_scroll =	lowrisc_con_scroll,
+        .con_scroll =	lowrisc_con_scroll,
 	.con_switch =	lowrisc_con_switch,
 	.con_blank =	lowrisc_con_blank,
 	.con_font_set =	lowrisc_con_font_set,
@@ -153,7 +180,7 @@ static int lowrisc_con_probe(struct platform_device *ofdev)
         console_lock();
         rc = do_take_over_console(&lowrisc_con, 0, MAX_NR_CONSOLES - 1, 1);
         console_unlock();
-	
+        
 	return rc;
 }
 
