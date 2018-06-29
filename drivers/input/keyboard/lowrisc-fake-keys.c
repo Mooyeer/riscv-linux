@@ -50,6 +50,8 @@ static int upper(int ch)
     case '@' : return 1;
     case '+' : return 1;
     case '_' : return 1;
+    case '(' : return 1;
+    case ')' : return 1;
     case '{' : return 1;
     case '}' : return 1;
     case '|' : return 1;
