@@ -81,20 +81,22 @@ struct net_local {
   
   /* Spinlock */
   spinlock_t lock;
-  uint16_t mdio_regs_cache[32];
+  uint32_t last_mdio_gpio;
   int irq;
+
+  struct napi_struct napi;
 };
 
-static void inline eth_write(struct net_local *lp, size_t addr, int data)
+static void inline eth_write(struct net_local *priv, size_t addr, int data)
 {
-  volatile uint64_t *eth_base = (volatile uint64_t *)(lp->ioaddr);
+  volatile uint64_t *eth_base = (volatile uint64_t *)(priv->ioaddr);
   eth_base[addr >> 3] = data;
 }
 
-static void inline eth_copyout(struct net_local *lp, uint8_t *data, int len)
+static void inline eth_copyout(struct net_local *priv, uint8_t *data, int len)
 {
   int i, rnd = ((len-1)|7)+1;
-  volatile uint64_t *eth_base = (volatile uint64_t *)(lp->ioaddr);
+  volatile uint64_t *eth_base = (volatile uint64_t *)(priv->ioaddr);
   if (!(((size_t)data) & 7))
     {
       uint64_t *ptr = (uint64_t *)data;
@@ -112,16 +114,16 @@ static void inline eth_copyout(struct net_local *lp, uint8_t *data, int len)
     }
 }
 
-static volatile inline int eth_read(struct net_local *lp, size_t addr)
+static volatile inline int eth_read(struct net_local *priv, size_t addr)
 {
-  volatile uint64_t *eth_base = (volatile uint64_t *)(lp->ioaddr);
+  volatile uint64_t *eth_base = (volatile uint64_t *)(priv->ioaddr);
   return eth_base[addr >> 3];
 }
 
-static inline void eth_copyin(struct net_local *lp, uint8_t *data, int len, int start)
+static inline void eth_copyin(struct net_local *priv, uint8_t *data, int len, int start)
 {
   int i, rnd = ((len-1)|7)+1;
-  volatile uint64_t *eth_base = (volatile uint64_t *)(lp->ioaddr);
+  volatile uint64_t *eth_base = (volatile uint64_t *)(priv->ioaddr);
   if (!(((size_t)data) & 7))
     {
       uint64_t *ptr = (uint64_t *)data;
@@ -138,16 +140,18 @@ static inline void eth_copyin(struct net_local *lp, uint8_t *data, int len, int 
     }
 }
 
-static void inline eth_enable_irq(struct net_local *lp)
+static void inline eth_enable_irq(struct net_local *priv)
 {
-  volatile uint64_t *eth_base = (volatile uint64_t *)(lp->ioaddr);
+  volatile uint64_t *eth_base = (volatile uint64_t *)(priv->ioaddr);
   eth_base[MACHI_OFFSET >> 3] |= MACHI_IRQ_EN;
+  mmiowb();
 }
 
-static void inline eth_disable_irq(struct net_local *lp)
+static void inline eth_disable_irq(struct net_local *priv)
 {
-  volatile uint64_t *eth_base = (volatile uint64_t *)(lp->ioaddr);
+  volatile uint64_t *eth_base = (volatile uint64_t *)(priv->ioaddr);
   eth_base[MACHI_OFFSET >> 3] &= ~MACHI_IRQ_EN;
+  mmiowb();
 }
 
 /**
@@ -162,14 +166,14 @@ static void inline eth_disable_irq(struct net_local *lp)
  * buffers (if configured).
  */
 
-static void lowrisc_update_address(struct net_local *lp, u8 *address_ptr)
+static void lowrisc_update_address(struct net_local *priv, u8 *address_ptr)
 {
   uint32_t macaddr_lo, macaddr_hi;
   uint32_t flags = 0;
   memcpy (&macaddr_lo, address_ptr+2, sizeof(uint32_t));
   memcpy (&macaddr_hi, address_ptr+0, sizeof(uint16_t));
-  eth_write(lp, MACLO_OFFSET, htonl(macaddr_lo));
-  eth_write(lp, MACHI_OFFSET, flags|htons(macaddr_hi));
+  eth_write(priv, MACLO_OFFSET, htonl(macaddr_lo));
+  eth_write(priv, MACHI_OFFSET, flags|htons(macaddr_hi));
 }
 
 /**
@@ -180,10 +184,10 @@ static void lowrisc_update_address(struct net_local *lp, u8 *address_ptr)
  * In lowrisc the starting value is programmed by the boot loader according to DIP switch [15:12]
  */
 
-static void lowrisc_read_mac_address(struct net_local *lp, u8 *address_ptr)
+static void lowrisc_read_mac_address(struct net_local *priv, u8 *address_ptr)
 {
-  uint32_t macaddr_hi = ntohs(eth_read(lp, MACHI_OFFSET)&MACHI_MACADDR_MASK);
-  uint32_t macaddr_lo = ntohl(eth_read(lp, MACLO_OFFSET));
+  uint32_t macaddr_hi = ntohs(eth_read(priv, MACHI_OFFSET)&MACHI_MACADDR_MASK);
+  uint32_t macaddr_lo = ntohl(eth_read(priv, MACLO_OFFSET));
   memcpy (address_ptr+2, &macaddr_lo, sizeof(uint32_t));
   memcpy (address_ptr+0, &macaddr_hi, sizeof(uint16_t));
 }
@@ -201,10 +205,10 @@ static void lowrisc_read_mac_address(struct net_local *lp, u8 *address_ptr)
  */
 static int lowrisc_set_mac_address(struct net_device *ndev, void *address)
 {
-	struct net_local *lp = netdev_priv(ndev);
+	struct net_local *priv = netdev_priv(ndev);
 	struct sockaddr *addr = address;
 	memcpy(ndev->dev_addr, addr->sa_data, ndev->addr_len);
-	lowrisc_update_address(lp, ndev->dev_addr);
+	lowrisc_update_address(priv, ndev->dev_addr);
 	return 0;
 }
 
@@ -216,15 +220,15 @@ static int lowrisc_set_mac_address(struct net_device *ndev, void *address)
  */
 static void lowrisc_tx_timeout(struct net_device *ndev)
 {
-	struct net_local *lp = netdev_priv(ndev);
+	struct net_local *priv = netdev_priv(ndev);
 
-	dev_err(&lp->ndev->dev, "Exceeded transmit timeout of %lu ms\n",
+	dev_err(&priv->ndev->dev, "Exceeded transmit timeout of %lu ms\n",
 		TX_TIMEOUT * 1000UL / HZ);
 
 	ndev->stats.tx_errors++;
 
 	/* Reset the device */
-	spin_lock(&lp->lock);
+	spin_lock(&priv->lock);
 
 	/* Shouldn't really be necessary, but shouldn't hurt */
 	netif_stop_queue(ndev);
@@ -234,7 +238,7 @@ static void lowrisc_tx_timeout(struct net_device *ndev)
 
 	/* We're all ready to go. Start the queue */
 	netif_wake_queue(ndev);
-	spin_unlock(&lp->lock);
+	spin_unlock(&priv->lock);
 }
 
 /**
@@ -247,16 +251,17 @@ static void lowrisc_tx_timeout(struct net_device *ndev)
  */
 static int lowrisc_close(struct net_device *ndev)
 {
-	struct net_local *lp = netdev_priv(ndev);
+	struct net_local *priv = netdev_priv(ndev);
 
 	netif_stop_queue(ndev);
-	eth_disable_irq(lp);
-	free_irq(lp->irq, ndev);
+        napi_disable(&priv->napi);
+	eth_disable_irq(priv);
+	free_irq(priv->irq, ndev);
         printk("Close device, free interrupt\n");
         
-	if (lp->phy_dev)
-		phy_disconnect(lp->phy_dev);
-	lp->phy_dev = NULL;
+	if (priv->phy_dev)
+		phy_disconnect(priv->phy_dev);
+	priv->phy_dev = NULL;
 
 	return 0;
 }
@@ -275,77 +280,42 @@ static void lowrisc_remove_ndev(struct net_device *ndev)
 	}
 }
 
-#ifndef CONFIG_LOWRISC_BITBANG
-
-static int lowrisc_mii_read(struct mii_bus *bus, int phyaddr, int regidx)
-{
-	struct net_local *lp = (struct net_local *)bus->priv;
-	int reg = -EIO;
-
-	spin_lock(&lp->lock);
-
-	reg = lp->mdio_regs_cache[regidx];
-
-	pr_debug("lowrisc_mii_read(%x,%x,%x);\n", phyaddr, regidx, reg);
-        
-	spin_unlock(&lp->lock);
-	return reg;
-}
-
-static int lowrisc_mii_write(struct mii_bus *bus, int phyaddr, int regidx,
-			   u16 val)
-{
-	struct net_local *lp = (struct net_local *)bus->priv;
-
-	spin_lock(&lp->lock);
-
-	if (regidx)
-          lp->mdio_regs_cache[regidx] = val;
-
-	pr_debug("lowrisc_mii_write(%x,%x,%x);\n", phyaddr, regidx, val);
-        
-	spin_unlock(&lp->lock);
-
-	return 0;
-}
-#endif
-
 static void lowrisc_phy_adjust_link(struct net_device *ndev)
 {
-	struct net_local *lp = netdev_priv(ndev);
-	struct phy_device *phy_dev = lp->phy_dev;
+	struct net_local *priv = netdev_priv(ndev);
+	struct phy_device *phy_dev = priv->phy_dev;
 	int carrier;
 
-	if (phy_dev->duplex != lp->last_duplex) {
+	if (phy_dev->duplex != priv->last_duplex) {
 		if (phy_dev->duplex) {
-			netif_dbg(lp, link, lp->ndev, "full duplex mode\n");
+			netif_dbg(priv, link, priv->ndev, "full duplex mode\n");
 		} else {
-			netif_dbg(lp, link, lp->ndev, "half duplex mode\n");
+			netif_dbg(priv, link, priv->ndev, "half duplex mode\n");
 		}
 
-		lp->last_duplex = phy_dev->duplex;
+		priv->last_duplex = phy_dev->duplex;
 	}
 
 	carrier = netif_carrier_ok(ndev);
-	if (carrier != lp->last_carrier) {
+	if (carrier != priv->last_carrier) {
 		if (carrier)
-			netif_dbg(lp, link, lp->ndev, "carrier OK\n");
+			netif_dbg(priv, link, priv->ndev, "carrier OK\n");
 		else
-			netif_dbg(lp, link, lp->ndev, "no carrier\n");
-		lp->last_carrier = carrier;
+			netif_dbg(priv, link, priv->ndev, "no carrier\n");
+		priv->last_carrier = carrier;
 	}
 }
 
 static int lowrisc_mii_probe(struct net_device *ndev)
 {
-	struct net_local *lp = netdev_priv(ndev);
+	struct net_local *priv = netdev_priv(ndev);
 	struct phy_device *phydev = NULL;
 	const char *phyname;
 	
-	BUG_ON(lp->phy_dev);
+	BUG_ON(priv->phy_dev);
 
 	/* Device only supports internal PHY at address 1 */
-	phydev = mdiobus_get_phy(lp->mii_bus, 1);
+	phydev = mdiobus_get_phy(priv->mii_bus, 1);
 	if (!phydev) {
 		netdev_err(ndev, "no PHY found at address 1\n");
 		return -ENODEV;
@@ -369,65 +339,61 @@ static int lowrisc_mii_probe(struct net_device *ndev)
 
 	phy_attached_info(phydev);
 
-	lp->phy_dev = phydev;
-	lp->last_duplex = -1;
-	lp->last_carrier = -1;
+	priv->phy_dev = phydev;
+	priv->last_duplex = -1;
+	priv->last_carrier = -1;
 
 	return 0;
 }
 
-#ifdef CONFIG_LOWRISC_BITBANG
-
-static uint32_t last_gpio;
-
 static void mdio_dir(struct mdiobb_ctrl *ctrl, int dir)
 {
-  struct net_local *lp = (struct net_local *)ctrl; /* struct mdiobb_ctrl must be first in net_local for bitbang driver to work */
+  struct net_local *priv = (struct net_local *)ctrl; /* struct mdiobb_ctrl must be first in net_local for bitbang driver to work */
   if (dir)
-    last_gpio |= MDIOCTRL_MDIOOEN_MASK;
+    priv->last_mdio_gpio &= ~MDIOCTRL_MDIOOEN_MASK; // output driving
   else
-    last_gpio &= ~MDIOCTRL_MDIOOEN_MASK;
+    priv->last_mdio_gpio |= MDIOCTRL_MDIOOEN_MASK; // input receiving
     
-  eth_write(lp, MDIOCTRL_OFFSET, last_gpio);
+  eth_write(priv, MDIOCTRL_OFFSET, priv->last_mdio_gpio);
 }
 
 static int mdio_get(struct mdiobb_ctrl *ctrl)
 {
-  struct net_local *lp = (struct net_local *)ctrl; /* struct mdiobb_ctrl must be first in net_local for bitbang driver to work */
-  uint32_t rslt = eth_read(lp, MDIOCTRL_OFFSET) & MDIOCTRL_MDIOIN_MASK ? 1:0;
+  struct net_local *priv = (struct net_local *)ctrl; /* struct mdiobb_ctrl must be first in net_local for bitbang driver to work */
+  uint32_t rslt = eth_read(priv, MDIOCTRL_OFFSET) & MDIOCTRL_MDIOIN_MASK ? 1:0;
   return rslt;
 }
 
 static void mdio_set(struct mdiobb_ctrl *ctrl, int what)
 {
-  struct net_local *lp = (struct net_local *)ctrl; /* struct mdiobb_ctrl must be first in net_local for bitbang driver to work */
+  struct net_local *priv = (struct net_local *)ctrl; /* struct mdiobb_ctrl must be first in net_local for bitbang driver to work */
   if (what)
-    last_gpio |= MDIOCTRL_MDIOOUT_MASK;
+    priv->last_mdio_gpio |= MDIOCTRL_MDIOOUT_MASK;
   else
-    last_gpio &= ~MDIOCTRL_MDIOOUT_MASK;
+    priv->last_mdio_gpio &= ~MDIOCTRL_MDIOOUT_MASK;
     
-  eth_write(lp, MDIOCTRL_OFFSET, last_gpio);
+  eth_write(priv, MDIOCTRL_OFFSET, priv->last_mdio_gpio);
 }
 
 static void mdc_set(struct mdiobb_ctrl *ctrl, int what)
 {
-  struct net_local *lp = (struct net_local *)ctrl; /* struct mdiobb_ctrl must be first in net_local for bitbang driver to work */
+  struct net_local *priv = (struct net_local *)ctrl; /* struct mdiobb_ctrl must be first in net_local for bitbang driver to work */
   if (what)
-    last_gpio |= MDIOCTRL_MDIOCLK_MASK;
+    priv->last_mdio_gpio |= MDIOCTRL_MDIOCLK_MASK;
   else
-    last_gpio &= ~MDIOCTRL_MDIOCLK_MASK;
+    priv->last_mdio_gpio &= ~MDIOCTRL_MDIOCLK_MASK;
     
-  eth_write(lp, MDIOCTRL_OFFSET, last_gpio);
+  eth_write(priv, MDIOCTRL_OFFSET, priv->last_mdio_gpio);
 }
 
 /* reset callback */
-static int lowrisc_reset(struct mii_bus *bus)
+static int mdio_reset(struct mii_bus *bus)
 {
-  struct net_local *lp = (struct net_local *)bus->priv;
-  eth_write(lp, MDIOCTRL_OFFSET, MDIOCTRL_MDIORST_MASK);
-  mdelay(1000);
-  eth_write(lp, MDIOCTRL_OFFSET, 0);
-  mdelay(1000);
+  struct net_local *priv = (struct net_local *)bus->priv;
+  eth_write(priv, MDIOCTRL_OFFSET, MDIOCTRL_MDIORST_MASK);
+  mdelay(100);
+  eth_write(priv, MDIOCTRL_OFFSET, 0);
+  mdelay(100);
   return 0;
 }
 
@@ -439,60 +405,16 @@ static struct mdiobb_ops mdio_gpio_ops = {
         .get_mdio_data = mdio_get,
 };
 
-#else
-
-static uint16_t mdio_regs_init[32] = {
-  /* 0x0 */ 0x3100, // was 0x2100, // was 0x3100,
-  /* 0x1 */ 0x782d, // was 0x780d, // was 0x782d,
-/* 0x2 */ 0x0007,
-/* 0x3 */ 0xc0f1,
-  /* 0x4 */ 0x01e1, // was 0x0181, // was 0x1e1,
-/* 0x5 */ 0x41e1,
-  /* 0x6 */ 0x0001, // was 0x0000, // was 0x0001,
-/* 0x7 */ 0xffff,
-/* 0x8 */ 0xffff,
-/* 0x9 */ 0xffff,
-/* 0xa */ 0xffff,
-/* 0xb */ 0xffff,
-/* 0xc */ 0xffff,
-/* 0xd */ 0xffff,
-/* 0xe */ 0xffff,
-/* 0xf */ 0x0000,
-/* 0x10 */ 0x0040,
-  /* 0x11 */ 0x0002, // was 0x0256, // was 0x2,
-/* 0x12 */ 0x60e1,
-/* 0x13 */ 0xffff,
-/* 0x14 */ 0x0000,
-/* 0x15 */ 0x0000,
-/* 0x16 */ 0x0000,
-/* 0x17 */ 0x0000,
-/* 0x18 */ 0xffff,
-/* 0x19 */ 0xffff,
-/* 0x1a */ 0x0000,
-  /* 0x1b */ 0x000a, // was 0x000b, // was 0xa,
-/* 0x1c */ 0x0000,
-  /* 0x1d */ 0x00c8, // was 0x00da, // was 0xc8,
-/* 0x1e */ 0x0000,
-  /* 0x1f */ 0x1058, // was 0x0058, // was 0x1058
-};
-#endif
-
 static int lowrisc_mii_init(struct net_device *ndev)
 {
         struct mii_bus *new_bus;
-	struct net_local *lp = netdev_priv(ndev);
+	struct net_local *priv = netdev_priv(ndev);
 	int err = -ENXIO;
 	
-#ifdef CONFIG_LOWRISC_BITBANG
-	lp->ctrl.ops = &mdio_gpio_ops;
-	lp->ctrl.reset = lowrisc_reset;
-        new_bus = alloc_mdio_bitbang(&(lp->ctrl));
-#else
-	new_bus = mdiobus_alloc();
-	new_bus->read = lowrisc_mii_read;
-	new_bus->write = lowrisc_mii_write;
-	memcpy(lp->mdio_regs_cache, mdio_regs_init, sizeof(lp->mdio_regs_cache));
-#endif	
+	priv->ctrl.ops = &mdio_gpio_ops;
+	priv->ctrl.reset = mdio_reset;
+        new_bus = alloc_mdio_bitbang(&(priv->ctrl));
+
 	if (!new_bus) {
 		err = -ENOMEM;
 		goto err_out_1;
@@ -505,28 +427,28 @@ static int lowrisc_mii_init(struct net_device *ndev)
 
 	mutex_init(&(new_bus->mdio_lock));
 	
-	lp->mii_bus = new_bus;
-	lp->mii_bus->priv = lp;
+	priv->mii_bus = new_bus;
+	priv->mii_bus->priv = priv;
 
 	/* Mask all PHYs except ID 1 (internal) */
-	lp->mii_bus->phy_mask = ~(1 << 1);
+	priv->mii_bus->phy_mask = ~(1 << 1);
 
-	if (mdiobus_register(lp->mii_bus)) {
-		netif_warn(lp, probe, lp->ndev, "Error registering mii bus\n");
+	if (mdiobus_register(priv->mii_bus)) {
+		netif_warn(priv, probe, priv->ndev, "Error registering mii bus\n");
 		goto err_out_free_bus_2;
 	}
 
 	if (lowrisc_mii_probe(ndev) < 0) {
-		netif_warn(lp, probe, lp->ndev, "Error probing mii bus\n");
+		netif_warn(priv, probe, priv->ndev, "Error probing mii bus\n");
 		goto err_out_unregister_bus_3;
 	}
 
 	return 0;
 
 err_out_unregister_bus_3:
-	mdiobus_unregister(lp->mii_bus);
+	mdiobus_unregister(priv->mii_bus);
 err_out_free_bus_2:
-	mdiobus_free(lp->mii_bus);
+	mdiobus_free(priv->mii_bus);
 err_out_1:
 	return err;
 }
@@ -542,60 +464,111 @@ err_out_1:
  * received and hands it over to the TCP/IP stack.
  */
 
-irqreturn_t lowrisc_ether_isr(int irq, void *dev_id)
+static int lowrisc_ether_poll(struct napi_struct *napi, int budget)
 {
-  int rsr, buf;
-  irqreturn_t rc = IRQ_NONE;
-  struct net_device *ndev = dev_id;
-  struct net_local *lp = netdev_priv(ndev);
-  spin_lock(&(lp->lock));
-  rsr = eth_read(lp, RSR_OFFSET);
+  int rsr, buf, rx_count = 0;
+  struct net_local *priv = container_of(napi, struct net_local, napi);
+  struct net_device *ndev = priv->ndev;
+  rsr = eth_read(priv, RSR_OFFSET);
   buf = rsr & RSR_RECV_FIRST_MASK;
   /* Check if there is Rx Data available */
-  while (rsr & RSR_RECV_DONE_MASK)
+  while ((rsr & RSR_RECV_DONE_MASK) && (rx_count < budget))
     {
-      int rplr = eth_read(lp, RPLR_OFFSET+((buf&7)<<3));
-      int errs = eth_read(lp, RBAD_OFFSET);
+      int rplr = eth_read(priv, RPLR_OFFSET+((buf&7)<<3));
+      int errs = eth_read(priv, RBAD_OFFSET);
       int len = (rplr & RPLR_LENGTH_MASK) - 4; /* discard FCS bytes */
-      rc = IRQ_HANDLED;
       if ((len >= 14) && ((0x101<<(buf&7)) & ~errs) && (len <= ETH_FRAME_LEN + ETH_FCS_LEN))
 	{
 	  int rnd = ((len-1)|7)+1; /* round to a multiple of 8 */
-	  struct sk_buff *skb = netdev_alloc_skb(ndev, rnd + NET_IP_ALIGN);
-	  if (!skb)
+	  struct sk_buff *skb = __napi_alloc_skb(napi, rnd, GFP_ATOMIC|__GFP_NOWARN); // Don't warn, just drop surplus packets
+	  if (unlikely(!skb))
 	    {
-	      /* Couldn't get memory. */
+	      /* Couldn't get memory, we carry on regardless and drop if necessary */
 	      ndev->stats.rx_dropped++;
-	      dev_err(&lp->ndev->dev, "Could not allocate receive buffer\n");
 	    }
 	  else
 	    {
 	      int start = RXBUFF_OFFSET/8 + ((buf&7)<<8);
-	      skb_reserve(skb, NET_IP_ALIGN);
-	      
-              eth_copyin(lp, skb->data, len, start);
               skb_put(skb, len);	/* Tell the skb how much data we got */
+	      
+              eth_copyin(priv, skb->data, len, start);
               skb->protocol = eth_type_trans(skb, ndev);
-              skb_checksum_none_assert(skb);
-              
+              netif_receive_skb(skb);
               ndev->stats.rx_packets++;
               ndev->stats.rx_bytes += len;
-              
-              if (!skb_defer_rx_timestamp(skb))
-                netif_rx(skb);	/* Send the packet upstream */
+              ++rx_count;
             }
         }
       else
 	  ndev->stats.rx_errors++;
       /* acknowledge, even if an error occurs, to reset irq */
-      eth_write(lp, RSR_OFFSET, ++buf);
-      rsr = eth_read(lp, RSR_OFFSET);
+      eth_write(priv, RSR_OFFSET, ++buf);
+      rsr = eth_read(priv, RSR_OFFSET);
     }
-  spin_unlock(&(lp->lock));
-  eth_enable_irq(lp);
-  
+
+  if (rx_count < budget)
+    {
+      napi_complete_done(napi, rx_count);
+      eth_enable_irq(priv);
+    }
+    
+  return rx_count;
+}
+
+irqreturn_t lowrisc_ether_isr(int irq, void *dev_id)
+{
+  int rsr;
+  irqreturn_t rc = IRQ_NONE;
+  struct net_device *ndev = dev_id;
+  struct net_local *priv = netdev_priv(ndev);
+  rsr = eth_read(priv, RSR_OFFSET);
+  /* Check if there is Rx Data available */
+  if (rsr & RSR_RECV_DONE_MASK)
+    {
+      if (napi_schedule_prep(&priv->napi))
+        {
+          eth_disable_irq(priv);
+          __napi_schedule(&priv->napi);
+          rc = IRQ_HANDLED;
+        }
+    }
   return rc;
 }
+
+static int lowrisc_get_regs_len(struct net_device __always_unused *netdev)
+{
+#define LOWRISC_REGS_LEN 40	/* overestimate */
+  return LOWRISC_REGS_LEN * sizeof(u32);
+}
+
+static void lowrisc_get_regs(struct net_device *ndev,
+			   struct ethtool_regs *regs, void *p)
+{
+  struct net_local *priv = netdev_priv(ndev);
+  struct phy_device *phy = priv->phy_dev;
+
+  u32 *regs_buff = p;
+  int i;
+
+  memset(p, 0, LOWRISC_REGS_LEN * sizeof(u32));
+
+  regs->version = 0;
+
+  for (i = 0; i < LOWRISC_REGS_LEN; i++)
+    {
+      if (i >= 32)
+	regs_buff[i] = eth_read(priv, MACLO_OFFSET+((i-32)<<3));
+      else
+	{
+	regs_buff[i] = phy_read(phy, i);
+	}
+    }
+}
+
+static const struct ethtool_ops lowrisc_ethtool_ops = {
+	.get_regs_len		= lowrisc_get_regs_len,
+	.get_regs		= lowrisc_get_regs
+};
 
 /**
  * lowrisc_open - Open the network device
@@ -606,91 +579,43 @@ irqreturn_t lowrisc_ether_isr(int irq, void *dev_id)
  * It also connects to the phy device, if MDIO is included in Ether100MHz device.
  */
 
-static int lowrisc_get_regs_len(struct net_device __always_unused *netdev)
-{
-#define LOWRISC_REGS_LEN 40	/* overestimate */
-  return LOWRISC_REGS_LEN * sizeof(u32);
-}
-
-s32 lowrisc_read_phy_reg(struct phy_device *phydev, u32 reg_addr, u16 * phy_data)
-{
-  u16 val = phy_read(phydev, reg_addr);
-  *phy_data = val;
-  return 0;
-}
-
-s32 lowrisc_write_phy_reg(struct phy_device *phydev, u32 reg_addr, u16 data)
-{
-  return phy_write(phydev, reg_addr, data);
-}
-
-static void lowrisc_get_regs(struct net_device *ndev,
-			   struct ethtool_regs *regs, void *p)
-{
-  struct net_local *lp = netdev_priv(ndev);
-  struct phy_device *phy = lp->phy_dev;
-
-  u32 *regs_buff = p;
-  u16 phy_data;
-  int i;
-
-  memset(p, 0, LOWRISC_REGS_LEN * sizeof(u32));
-
-  regs->version = 0;
-
-  for (i = 0; i < LOWRISC_REGS_LEN; i++)
-    {
-      if (i >= 32)
-	regs_buff[i] = eth_read(lp, MACLO_OFFSET+((i-32)<<3));
-      else
-	{
-	lowrisc_read_phy_reg(phy, i, &phy_data);
-	regs_buff[i] = phy_data;
-	}
-    }
-}
-
-static const struct ethtool_ops lowrisc_ethtool_ops = {
-	.get_regs_len		= lowrisc_get_regs_len,
-	.get_regs		= lowrisc_get_regs
-};
-
 static int lowrisc_open(struct net_device *ndev)
 {
   int retval;
-  struct net_local *lp = netdev_priv(ndev);
+  struct net_local *priv = netdev_priv(ndev);
   ndev->ethtool_ops = &lowrisc_ethtool_ops;
 
   /* Set the MAC address each time opened */
-  lowrisc_update_address(lp, ndev->dev_addr);
+  lowrisc_update_address(priv, ndev->dev_addr);
   
-  if (lp->phy_dev) {
+  if (priv->phy_dev) {
     /* Ether100MHz doesn't support giga-bit speeds */
-    lp->phy_dev->supported &= (PHY_BASIC_FEATURES);
-    lp->phy_dev->advertising = lp->phy_dev->supported;
+    priv->phy_dev->supported &= (PHY_BASIC_FEATURES);
+    priv->phy_dev->advertising = priv->phy_dev->supported;
     
-    phy_start(lp->phy_dev);
+    phy_start(priv->phy_dev);
   }
   
   /* Grab the IRQ */
-  printk("Open device, request interrupt %d\n", lp->irq);
-  retval = request_irq(lp->irq, lowrisc_ether_isr, IRQF_SHARED, ndev->name, ndev);
+  printk("Open device, request interrupt %d\n", priv->irq);
+  retval = request_irq(priv->irq, lowrisc_ether_isr, IRQF_SHARED, ndev->name, ndev);
   if (retval) {
-    dev_err(&lp->ndev->dev, "Could not allocate interrupt %d\n", INTERRUPT_CAUSE_SOFTWARE);
-    if (lp->phy_dev)
-      phy_disconnect(lp->phy_dev);
-    lp->phy_dev = NULL;
+    dev_err(&priv->ndev->dev, "Could not allocate interrupt %d\n", INTERRUPT_CAUSE_SOFTWARE);
+    if (priv->phy_dev)
+      phy_disconnect(priv->phy_dev);
+    priv->phy_dev = NULL;
     
     return retval;
   }
   
-  lowrisc_update_address(lp, ndev->dev_addr);
+  lowrisc_update_address(priv, ndev->dev_addr);
 
   /* We're ready to go */
+  napi_enable(&priv->napi);
   netif_start_queue(ndev);
 
   /* first call to handler enables the irq */
-  lowrisc_ether_isr(lp->irq, ndev);
+  lowrisc_ether_isr(priv->irq, ndev);
   return 0;
 }
 
@@ -706,16 +631,16 @@ static int lowrisc_open(struct net_device *ndev)
  */
 static int lowrisc_send(struct sk_buff *new_skb, struct net_device *ndev)
 {
-	struct net_local *lp = netdev_priv(ndev);
+	struct net_local *priv = netdev_priv(ndev);
 	unsigned int len = new_skb->len;
         int rslt;
-	spin_lock(&lp->lock);
-        rslt = eth_read(lp, TPLR_OFFSET);
+	spin_lock(&priv->lock);
+        rslt = eth_read(priv, TPLR_OFFSET);
         if (rslt & TPLR_BUSY_MASK)
           printk("TX Busy Status = %x, len = %d, ignoring\n", rslt, len);
-        eth_copyout(lp, new_skb->data, len);
-        eth_write(lp, TPLR_OFFSET, len);
-	spin_unlock(&lp->lock);
+        eth_copyout(priv, new_skb->data, len);
+        eth_write(priv, TPLR_OFFSET, len);
+	spin_unlock(&priv->lock);
 
 	skb_tx_timestamp(new_skb);
 
@@ -728,35 +653,19 @@ static int lowrisc_send(struct sk_buff *new_skb, struct net_device *ndev)
 
 static int lowrisc_mii_ioctl(struct net_device *netdev, struct ifreq *ifr, int cmd)
 {
-        struct net_local *lp = netdev_priv(netdev);
-	struct phy_device *phy = lp->phy_dev;
+        struct net_local *priv = netdev_priv(netdev);
+	struct phy_device *phy = priv->phy_dev;
         struct mii_ioctl_data *data = if_mii(ifr);
-        u16 mii_reg;
 
         switch (cmd) {
         case SIOCGMIIPHY:
                 data->phy_id = 1;
                 break;
         case SIOCGMIIREG:
-                spin_lock(&lp->lock);
-                if (lowrisc_read_phy_reg(phy, data->reg_num & 0x1F,
-                                   &data->val_out)) {
-                        spin_unlock(&lp->lock);
-                        return -EIO;
-                }
-                spin_unlock(&lp->lock);
+                data->val_out = phy_read(phy, data->reg_num);
                 break;
         case SIOCSMIIREG:
-                if (data->reg_num & ~(0x1F))
-                        return -EFAULT;
-                mii_reg = data->val_in;
-                spin_lock(&lp->lock);
-                if (lowrisc_write_phy_reg(phy, data->reg_num,
-                                        mii_reg)) {
-                        spin_unlock(&lp->lock);
-                        return -EIO;
-                }
-                spin_unlock(&lp->lock);
+                phy_write(phy, data->reg_num, data->val_in);
                 break;
         default:
                 return -EOPNOTSUPP;
@@ -790,7 +699,7 @@ static struct net_device_ops lowrisc_netdev_ops = {
 static int lowrisc_100MHz_probe(struct platform_device *ofdev)
 {
 	struct net_device *ndev = NULL;
-	struct net_local *lp = NULL;
+	struct net_local *priv = NULL;
 	struct device *dev = &ofdev->dev;
         struct resource *lowrisc_ethernet;
 	unsigned char mac_address[7];
@@ -805,32 +714,34 @@ static int lowrisc_100MHz_probe(struct platform_device *ofdev)
 
 	dev_set_drvdata(dev, ndev);
 	SET_NETDEV_DEV(ndev, &ofdev->dev);
-
-	lp = netdev_priv(ndev);
-	lp->ndev = ndev;
-        lp->ioaddr = devm_ioremap_resource(&ofdev->dev, lowrisc_ethernet);
-
-	printk("lowrisc-digilent-ethernet: Lowrisc ethernet platform (%llX-%llX) mapped to %lx\n",
-               lowrisc_ethernet[0].start,
-               lowrisc_ethernet[0].end,
-               (size_t)(lp->ioaddr));
-
-        lp->irq = platform_get_irq(ofdev, 0);
+        platform_set_drvdata(ofdev, ndev);
         
-	spin_lock_init(&lp->lock);
-
-        /* get the MAC address set by the boot loader */
-        lowrisc_read_mac_address(lp, mac_address);
-	memcpy(ndev->dev_addr, mac_address, ETH_ALEN);
-
-	/* Set the MAC address in the Ether100MHz device */
-	lowrisc_update_address(lp, ndev->dev_addr);
-
-	lowrisc_mii_init(ndev);
+	priv = netdev_priv(ndev);
+	priv->ndev = ndev;
+        priv->ioaddr = devm_ioremap_resource(&ofdev->dev, lowrisc_ethernet);
 
 	ndev->netdev_ops = &lowrisc_netdev_ops;
 	ndev->flags &= ~IFF_MULTICAST;
 	ndev->watchdog_timeo = TX_TIMEOUT;
+        netif_napi_add(ndev, &priv->napi, lowrisc_ether_poll, 8);
+
+	printk("lowrisc-digilent-ethernet: Lowrisc ethernet platform (%llX-%llX) mapped to %lx\n",
+               lowrisc_ethernet[0].start,
+               lowrisc_ethernet[0].end,
+               (size_t)(priv->ioaddr));
+
+        priv->irq = platform_get_irq(ofdev, 0);
+        
+	spin_lock_init(&priv->lock);
+
+        /* get the MAC address set by the boot loader */
+        lowrisc_read_mac_address(priv, mac_address);
+	memcpy(ndev->dev_addr, mac_address, ETH_ALEN);
+
+	/* Set the MAC address in the Ether100MHz device */
+	lowrisc_update_address(priv, ndev->dev_addr);
+
+	lowrisc_mii_init(ndev);
 
 	/* Finally, register the device */
 	rc = register_netdev(ndev);

@@ -19,7 +19,6 @@
 #define RPLR_OFFSET         0x0840          /* Rx packet length register array */
 
 #define RXBUFF_OFFSET       0x4000          /* Receive Buffer */
-#define MDIORD_RDDATA_MASK    0x0000FFFF    /* Data to be Read */
 
 /* MAC Ctrl Register (MACHI) Bit Masks */
 #define MACHI_MACADDR_MASK    0x0000FFFF     /* MAC high 16-bits mask */
@@ -31,7 +30,7 @@
 /* MDIO Control Register Bit Masks */
 #define MDIOCTRL_MDIOCLK_MASK 0x00000001    /* MDIO Clock Mask */
 #define MDIOCTRL_MDIOOUT_MASK 0x00000002    /* MDIO Output Mask */
-#define MDIOCTRL_MDIOOEN_MASK 0x00000004    /* MDIO Output Enable Mask */
+#define MDIOCTRL_MDIOOEN_MASK 0x00000004    /* MDIO Output Enable Mask, 3-state enable, high=input, low=output */
 #define MDIOCTRL_MDIORST_MASK 0x00000008    /* MDIO Input Mask */
 #define MDIOCTRL_MDIOIN_MASK  0x00000008    /* MDIO Input Mask */
 
