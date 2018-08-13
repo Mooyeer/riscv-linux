@@ -137,4 +137,4 @@ all.config
 vmlinux.dis
 
 # Init root fs
-initramfs.cpio
+initramfs*.cpio
