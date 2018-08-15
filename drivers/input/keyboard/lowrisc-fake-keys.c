@@ -6,6 +6,16 @@
  * Copyright 2007-2009 HV Sistemas S.L.
  *
  * Licensed under the GPL-2 or later.
+ *
+ * This driver acts as a shadow console, forwarding serial port events to the main console
+ * using the input event mechanism. It's primary use is to allow LowRISC to be used via
+ * a serial port without screen and keyboard being connected.
+ *
+ * It also may be used as a conduit to shadow an approximation of console output to the serial port
+ *
+ * Since console output is already processed according to the type of device at this point, it would
+ * be too complicated to replicate all the behaviour of a serial console. So everything other than
+ * emergency hacking should be done via ssh (for editing) or sftp (for uploading)
  */
 
 #include <linux/input.h>
@@ -19,17 +29,31 @@
 #include <linux/slab.h>
 #include <asm/io.h>
 #include <linux/uaccess.h>
+#include <asm/sbi.h>
 
 #define DRIVER_NAME "lowrisc-fake"
 
-struct lowrisc_fake {
+static struct lowrisc_fake {
   struct platform_device *pdev;
   struct resource *fake;
   spinlock_t lock;
   volatile uint32_t *fake_base;
   struct input_dev *input;
   unsigned short keycodes[128];
-};
+} lowrisc_fake_static;
+
+void lowrisc_shadow_console_putchar(int ch)
+{
+  volatile uint64_t *tx = (volatile uint64_t *)(lowrisc_fake_static.fake_base);
+  if (tx)
+    {
+      *tx = ch & 0x7f; /* just send the US ASCII subset */
+    }
+  else /* probe function not called yet */
+    {
+      sbi_console_putchar(ch);
+    }
+}
 
 static int upper(int ch)
 {
@@ -163,10 +187,12 @@ static int lowrisc_fake_probe(struct platform_device *pdev)
   struct device *dev = &pdev->dev;
 
   printk("lowrisc_fake_probe\n");
-  lowrisc_fake = devm_kzalloc(&pdev->dev, sizeof(struct lowrisc_fake), GFP_KERNEL);
-  if (!lowrisc_fake) {
+  lowrisc_fake = &lowrisc_fake_static;
+  
+  if (lowrisc_fake->fake_base) /* Only one instance allowed */
+    {
     return -ENOMEM;
-  }
+    }
 
   lowrisc_fake->fake = platform_get_resource(pdev, IORESOURCE_MEM, 0);
   if (!request_mem_region(lowrisc_fake->fake->start, resource_size(lowrisc_fake->fake), "lowrisc_fake"))

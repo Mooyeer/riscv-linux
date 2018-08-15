@@ -6,6 +6,20 @@
  * Copyright 2007-2009 HV Sistemas S.L.
  *
  * Licensed under the GPL-2 or later.
+ *
+ * This driver polls the Nexys4DDR onboard PIC which has a PS/2 to USB converter for legacy keyboards
+ * Newer keyboards such as Apple USB do not use PS/2 emulation so you are out of luck.
+ * This driver was tested with a Microsoft Wired Keyboard 200, which meets the above criterion.
+ * Alternatively PS/2 keyboards that have a USB adaptor plug would probably be suitable (but untested)
+ *
+ * The Verilog sub-system generates raw scancodes which this driver converts to PC standard codes, and
+ * the input subsystem then converts them to ASCII according National/Regional preferences.
+ *
+ * There may be missing or incorrect codes which can be corrected in RTL, but the PIC programming is not
+ * open source as far as I am aware, so unhappy users should use the lowrisc-fake-keys.c driver which
+ * emulates serial events for all keyboards over the serial port. In the latter case the USB port is free
+ * to attach a mouse or similar device, but emulation speeds are too limited for effective graphical console
+ * use (and VGA graphics RTL would have to be designed).
  */
 
 #include <linux/input.h>

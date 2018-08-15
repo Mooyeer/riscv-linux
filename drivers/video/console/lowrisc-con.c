@@ -2,6 +2,9 @@
  *  linux/drivers/video/lowrisc_con.c -- A lowrisc console driver
  *
  *  Based on dummycon.c (for plain VGA text)
+ *
+ *  This lowrisc device is designed to replicate some of the functions of a PC VGA console
+ *  It does not have graphics, colour is rudimentary and scrolling primitive. Cursor control is TBD.
  */
 
 #include <linux/types.h>
@@ -27,6 +30,7 @@
 #define LOWRISC_ROWS	31
 
 static uint16_t *hid_vga_ptr;
+static int oldxpos, oldypos;
 
 static void mymove(uint16_t *dest, const uint16_t *src, size_t n)
 {
@@ -67,7 +71,18 @@ static void lowrisc_con_clear(struct vc_data *vc, int sy, int sx, int height, in
 
 static void lowrisc_con_putc(struct vc_data *vc, int c, int ypos, int xpos)
 {
+  extern void lowrisc_shadow_console_putchar(int);
   hid_vga_ptr[LOWRISC_COLUMNS*ypos+xpos] = c;
+#ifdef CONFIG_KEYBOARD_LOWRISC
+  if (xpos == oldxpos) lowrisc_shadow_console_putchar('\b');
+  else if (xpos < oldxpos) lowrisc_shadow_console_putchar('\r');
+  else if (xpos > oldxpos) lowrisc_shadow_console_putchar(' ');
+  if (ypos > oldypos) lowrisc_shadow_console_putchar('\n');
+  lowrisc_shadow_console_putchar(c);
+  if (xpos == oldxpos) lowrisc_shadow_console_putchar('\b');
+#endif  
+  oldxpos = xpos;
+  oldypos = ypos;
 }
 
 static void lowrisc_con_putcs(struct vc_data *vc, const unsigned short *s, int count, int ypos, int xpos)
@@ -81,6 +96,7 @@ static bool lowrisc_con_scroll(struct vc_data *vc, unsigned int top,
                            unsigned int bottom, enum con_scroll dir,
                            unsigned int lines)
 {
+  oldypos--;
 #if 0
   if (lines <= 0)
     return false;
