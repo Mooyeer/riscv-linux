@@ -79,10 +79,15 @@ static void lowrisc_con_putc(struct vc_data *vc, int c, int ypos, int xpos)
   else if (xpos > oldxpos+1) lowrisc_shadow_console_putchar(' ');
   if (ypos > oldypos) lowrisc_shadow_console_putchar('\n');
   lowrisc_shadow_console_putchar(c);
-  if (xpos == oldxpos) lowrisc_shadow_console_putchar('\b');
-#endif  
-  oldxpos = xpos;
+  if (xpos == oldxpos)
+    {
+      lowrisc_shadow_console_putchar('\b');
+      oldxpos = xpos-1;
+    }
+  else
+    oldxpos = xpos;
   oldypos = ypos;
+#endif
 }
 
 static void lowrisc_con_putcs(struct vc_data *vc, const unsigned short *s, int count, int ypos, int xpos)
