@@ -76,7 +76,7 @@ static void lowrisc_con_putc(struct vc_data *vc, int c, int ypos, int xpos)
 #ifdef CONFIG_KEYBOARD_LOWRISC
   if (xpos == oldxpos) lowrisc_shadow_console_putchar('\b');
   else if (xpos < oldxpos) lowrisc_shadow_console_putchar('\r');
-  else if (xpos > oldxpos) lowrisc_shadow_console_putchar(' ');
+  else if (xpos > oldxpos+1) lowrisc_shadow_console_putchar(' ');
   if (ypos > oldypos) lowrisc_shadow_console_putchar('\n');
   lowrisc_shadow_console_putchar(c);
   if (xpos == oldxpos) lowrisc_shadow_console_putchar('\b');
