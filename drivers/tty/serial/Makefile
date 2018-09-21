@@ -57,7 +57,6 @@ obj-$(CONFIG_SERIAL_SGI_IOC4) += ioc4_serial.o
 obj-$(CONFIG_SERIAL_SGI_IOC3) += ioc3_serial.o
 obj-$(CONFIG_SERIAL_ATMEL) += atmel_serial.o
 obj-$(CONFIG_SERIAL_UARTLITE) += uartlite.o
-obj-$(CONFIG_SERIAL_LOWRISC) += uartlowrisc.o
 obj-$(CONFIG_SERIAL_MSM) += msm_serial.o
 obj-$(CONFIG_SERIAL_QCOM_GENI) += qcom_geni_serial.o
 obj-$(CONFIG_SERIAL_NETX) += netx-serial.o
@@ -90,7 +89,6 @@ obj-$(CONFIG_SERIAL_MVEBU_UART)	+= mvebu-uart.o
 obj-$(CONFIG_SERIAL_PIC32)	+= pic32_uart.o
 obj-$(CONFIG_SERIAL_MPS2_UART)	+= mps2-uart.o
 obj-$(CONFIG_SERIAL_OWL)	+= owl-uart.o
-obj-$(CONFIG_SERIAL_SIFIVE)	+= sifive.o
 
 # GPIOLIB helpers for modem control lines
 obj-$(CONFIG_SERIAL_MCTRL_GPIO)	+= serial_mctrl_gpio.o

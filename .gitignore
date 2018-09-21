@@ -132,9 +132,3 @@ all.config
 
 # Kdevelop4
 *.kdev4
-
-# Disassembly
-vmlinux.dis
-
-# Init root fs
-initramfs*.cpio

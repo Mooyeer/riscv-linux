@@ -41,15 +41,6 @@ void arch_send_call_function_single_ipi(int cpu);
  */
 #define raw_smp_processor_id() (*((int*)((char*)get_current() + TASK_TI_CPU)))
 
-/* Interprocessor interrupt handler */
-irqreturn_t handle_ipi(void);
-
-#ifdef CONFIG_HOTPLUG_CPU
-extern int __cpu_disable(void);
-extern void __cpu_die(unsigned int cpu);
-extern void cpu_play_dead(void);
-extern void boot_sec_cpu(void);
-#endif
 #endif /* CONFIG_SMP */
 
 #endif /* _ASM_RISCV_SMP_H */

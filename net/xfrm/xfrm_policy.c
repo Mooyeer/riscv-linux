@@ -1658,7 +1658,6 @@ static struct dst_entry *xfrm_bundle_create(struct xfrm_policy *policy,
 		trailer_len -= xdst_prev->u.dst.xfrm->props.trailer_len;
 	}
 
-out:
 	return &xdst0->u.dst;
 
 put_states:
@@ -1667,8 +1666,8 @@ put_states:
 free_dst:
 	if (xdst0)
 		dst_release_immediate(&xdst0->u.dst);
-	xdst0 = ERR_PTR(err);
-	goto out;
+
+	return ERR_PTR(err);
 }
 
 static int xfrm_expand_policies(const struct flowi *fl, u16 family,
@@ -2286,6 +2285,9 @@ struct dst_entry *xfrm_lookup_route(struct net *net, struct dst_entry *dst_orig,
 
 	if (IS_ERR(dst) && PTR_ERR(dst) == -EREMOTE)
 		return make_blackhole(net, dst_orig->ops->family, dst_orig);
+
+	if (IS_ERR(dst))
+		dst_release(dst_orig);
 
 	return dst;
 }

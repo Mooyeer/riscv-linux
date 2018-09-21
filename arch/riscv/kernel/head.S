@@ -45,7 +45,6 @@ ENTRY(_start)
 	bnez a3, .Lsecondary_start
 
 	/* Save hart ID and DTB physical address */
-	la a1, dtb
 	mv s0, a0
 	mv s1, a1
 
@@ -95,6 +94,7 @@ relocate:
 	or a0, a0, a1
 	sfence.vma
 	csrw sptbr, a0
+.align 2
 1:
 	/* Set trap vector to spin forever to help debug */
 	la a0, .Lsecondary_park
@@ -144,30 +144,13 @@ relocate:
 	tail smp_callin
 #endif
 
+.align 2
 .Lsecondary_park:
 	/* We lack SMP support or have too many harts, so park this hart */
 	wfi
 	j .Lsecondary_park
 END(_start)
 
-#ifdef CONFIG_SMP
-.section .text
-.global boot_sec_cpu
-
-boot_sec_cpu:
-	/* clear all pending flags */
-	csrw sip, zero
-	/* Mask all interrupts */
-	csrw sie, zero
-	fence
-
-	tail smp_callin
-#endif
-
-dtb:
-	/* temporarily hack in modified device tree blob */
-	.incbin "arch/riscv/kernel/lowrisc.dtb"
-	
 __PAGE_ALIGNED_BSS
 	/* Empty zero page */
 	.balign PAGE_SIZE

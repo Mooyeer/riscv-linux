@@ -284,6 +284,20 @@ static inline int set_4byte(struct spi_nor *nor, const struct flash_info *info,
 		if (need_wren)
 			write_disable(nor);
 
+		if (!status && !enable &&
+		    JEDEC_MFR(info) == SNOR_MFR_WINBOND) {
+			/*
+			 * On Winbond W25Q256FV, leaving 4byte mode causes
+			 * the Extended Address Register to be set to 1, so all
+			 * 3-byte-address reads come from the second 16M.
+			 * We must clear the register to enable normal behavior.
+			 */
+			write_enable(nor);
+			nor->cmd_buf[0] = 0;
+			nor->write_reg(nor, SPINOR_OP_WREAR, nor->cmd_buf, 1);
+			write_disable(nor);
+		}
+
 		return status;
 	default:
 		/* Spansion style */
@@ -980,6 +994,7 @@ static const struct flash_info spi_nor_ids[] = {
 	{ "en25q32b",   INFO(0x1c3016, 0, 64 * 1024,   64, 0) },
 	{ "en25p64",    INFO(0x1c2017, 0, 64 * 1024,  128, 0) },
 	{ "en25q64",    INFO(0x1c3017, 0, 64 * 1024,  128, SECT_4K) },
+	{ "en25qh32",   INFO(0x1c7016, 0, 64 * 1024,   64, 0) },
 	{ "en25qh128",  INFO(0x1c7018, 0, 64 * 1024,  256, 0) },
 	{ "en25qh256",  INFO(0x1c7019, 0, 64 * 1024,  512, 0) },
 	{ "en25s64",	INFO(0x1c3817, 0, 64 * 1024,  128, SECT_4K) },
@@ -1049,22 +1064,14 @@ static const struct flash_info spi_nor_ids[] = {
 			SECT_4K | SPI_NOR_DUAL_READ | SPI_NOR_QUAD_READ) },
 	{ "is25lp128",  INFO(0x9d6018, 0, 64 * 1024, 256,
 			SECT_4K | SPI_NOR_DUAL_READ) },
-	{ "is25wp032",  INFO(0x9d7016, 0, 32 * 1024,  128,
-	                SECT_4K | SPI_NOR_DUAL_READ | SPI_NOR_QUAD_READ)
-	                .quad_enable = macronix_quad_enable,
-	},
-	{ "is25wp064",  INFO(0x9d7017, 0, 32 * 1024,  256,
-	                SECT_4K | SPI_NOR_DUAL_READ | SPI_NOR_QUAD_READ)
-	                .quad_enable = macronix_quad_enable,
-	},
-	{ "is25wp128",  INFO(0x9d7018, 0, 32 * 1024,  512,
-	                SECT_4K | SPI_NOR_DUAL_READ | SPI_NOR_QUAD_READ)
-	                .quad_enable = macronix_quad_enable,
-	},
-	{ "is25wp256d", INFO(0x9d7019, 0, 32 * 1024, 1024,
-	                SECT_4K | SPI_NOR_DUAL_READ | SPI_NOR_QUAD_READ | SPI_NOR_4B_OPCODES)
-			.quad_enable = macronix_quad_enable,
-	},
+	{ "is25lp256",  INFO(0x9d6019, 0, 64 * 1024, 512,
+			SECT_4K | SPI_NOR_DUAL_READ) },
+	{ "is25wp032",  INFO(0x9d7016, 0, 64 * 1024,  64,
+			SECT_4K | SPI_NOR_DUAL_READ | SPI_NOR_QUAD_READ) },
+	{ "is25wp064",  INFO(0x9d7017, 0, 64 * 1024, 128,
+			SECT_4K | SPI_NOR_DUAL_READ | SPI_NOR_QUAD_READ) },
+	{ "is25wp128",  INFO(0x9d7018, 0, 64 * 1024, 256,
+			SECT_4K | SPI_NOR_DUAL_READ | SPI_NOR_QUAD_READ) },
 
 	/* Macronix */
 	{ "mx25l512e",   INFO(0xc22010, 0, 64 * 1024,   1, SECT_4K) },
@@ -1103,6 +1110,7 @@ static const struct flash_info spi_nor_ids[] = {
 	{ "n25q512ax3",  INFO(0x20ba20, 0, 64 * 1024, 1024, SECT_4K | USE_FSR | SPI_NOR_QUAD_READ) },
 	{ "n25q00",      INFO(0x20ba21, 0, 64 * 1024, 2048, SECT_4K | USE_FSR | SPI_NOR_QUAD_READ | NO_CHIP_ERASE) },
 	{ "n25q00a",     INFO(0x20bb21, 0, 64 * 1024, 2048, SECT_4K | USE_FSR | SPI_NOR_QUAD_READ | NO_CHIP_ERASE) },
+	{ "mt25qu02g",   INFO(0x20bb22, 0, 64 * 1024, 4096, SECT_4K | USE_FSR | SPI_NOR_QUAD_READ | NO_CHIP_ERASE) },
 
 	/* PMC */
 	{ "pm25lv512",   INFO(0,        0, 32 * 1024,    2, SECT_4K_PMC) },
@@ -1214,6 +1222,11 @@ static const struct flash_info spi_nor_ids[] = {
 			SECT_4K | SPI_NOR_DUAL_READ | SPI_NOR_QUAD_READ |
 			SPI_NOR_HAS_LOCK | SPI_NOR_HAS_TB)
 	},
+	{
+		"w25q32jv", INFO(0xef7016, 0, 64 * 1024,  64,
+			SECT_4K | SPI_NOR_DUAL_READ | SPI_NOR_QUAD_READ |
+			SPI_NOR_HAS_LOCK | SPI_NOR_HAS_TB)
+	},
 	{ "w25x64", INFO(0xef3017, 0, 64 * 1024, 128, SECT_4K) },
 	{ "w25q64", INFO(0xef4017, 0, 64 * 1024, 128, SECT_4K) },
 	{
@@ -1246,6 +1259,10 @@ static const struct flash_info spi_nor_ids[] = {
 	{ "3S400AN", S3AN_INFO(0x1f2400, 256, 264) },
 	{ "3S700AN", S3AN_INFO(0x1f2500, 512, 264) },
 	{ "3S1400AN", S3AN_INFO(0x1f2600, 512, 528) },
+
+	/* XMC (Wuhan Xinxin Semiconductor Manufacturing Corp.) */
+	{ "XM25QH64A", INFO(0x207017, 0, 64 * 1024, 128, SECT_4K | SPI_NOR_DUAL_READ | SPI_NOR_QUAD_READ) },
+	{ "XM25QH128A", INFO(0x207018, 0, 64 * 1024, 256, SECT_4K | SPI_NOR_DUAL_READ | SPI_NOR_QUAD_READ) },
 	{ },
 };
 
@@ -1496,45 +1513,6 @@ static int macronix_quad_enable(struct spi_nor *nor)
 	}
 
 	return 0;
-}
-
-/**
- * issi_unlock() - clear BP[0123] write-protection.
- * @nor:	pointer to a 'struct spi_nor'
- *
- * Bits [2345] of the Status Register are BP[0123].
- * ISSI chips use a different block protection scheme than other chips.
- * Just disable the write-protect unilaterally.
- *
- * Return: 0 on success, -errno otherwise.
- */
-static int issi_unlock(struct spi_nor *nor)
-{
-	int ret, val;
-	u8 mask = SR_BP0 | SR_BP1 | SR_BP2 | SR_BP3;
-
-	val = read_sr(nor);
-	if (val < 0)
-		return val;
-	if (!(val & mask))
-		return 0;
-
-	write_enable(nor);
-
-	write_sr(nor, val & ~mask);
-
-	ret = spi_nor_wait_till_ready(nor);
-	if (ret)
-		return ret;
-
-	ret = read_sr(nor);
-	if (ret > 0 && !(ret & mask)) {
-		dev_info(nor->dev, "ISSI Block Protection Bits cleared\n");
-		return 0;
-	} else {
-		dev_err(nor->dev, "ISSI Block Protection Bits not cleared\n");
-		return -EINVAL;
-	}
 }
 
 /*
@@ -2769,9 +2747,6 @@ static int spi_nor_init(struct spi_nor *nor)
 		spi_nor_wait_till_ready(nor);
 	}
 
-	if (JEDEC_MFR(nor->info) == SNOR_MFR_ISSI)
-		issi_unlock(nor);
-
 	if (nor->quad_enable) {
 		err = nor->quad_enable(nor);
 		if (err) {
@@ -2951,7 +2926,7 @@ int spi_nor_scan(struct spi_nor *nor, const char *name,
 	if (ret)
 		return ret;
 
-	if (nor->addr_width && JEDEC_MFR(info) != SNOR_MFR_ISSI) {
+	if (nor->addr_width) {
 		/* already configured from SFDP */
 	} else if (info->addr_width) {
 		nor->addr_width = info->addr_width;

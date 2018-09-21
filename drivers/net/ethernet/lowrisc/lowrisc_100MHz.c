@@ -46,7 +46,8 @@
 #include <linux/slab.h>
 #include <linux/delay.h>
 #include <linux/platform_device.h>
-#include <linux/platform_data/mdio-gpio.h>
+#include <linux/mdio-bitbang.h>
+#include <linux/mdio-gpio.h>
 #include "lowrisc_100MHz.h"
 
 #define DRIVER_AUTHOR	"WOOJUNG HUH <woojung.huh@microchip.com>"
@@ -386,6 +387,7 @@ static void mdc_set(struct mdiobb_ctrl *ctrl, int what)
   eth_write(priv, MDIOCTRL_OFFSET, priv->last_mdio_gpio);
 }
 
+#ifdef MDIO_RESET
 /* reset callback */
 static int mdio_reset(struct mii_bus *bus)
 {
@@ -396,6 +398,7 @@ static int mdio_reset(struct mii_bus *bus)
   mdelay(100);
   return 0;
 }
+#endif
 
 static struct mdiobb_ops mdio_gpio_ops = {
         .owner = THIS_MODULE,
@@ -412,7 +415,9 @@ static int lowrisc_mii_init(struct net_device *ndev)
 	int err = -ENXIO;
 	
 	priv->ctrl.ops = &mdio_gpio_ops;
+#ifdef MDIO_RESET
 	priv->ctrl.reset = mdio_reset;
+#endif
         new_bus = alloc_mdio_bitbang(&(priv->ctrl));
 
 	if (!new_bus) {
@@ -600,7 +605,7 @@ static int lowrisc_open(struct net_device *ndev)
   printk("Open device, request interrupt %d\n", priv->irq);
   retval = request_irq(priv->irq, lowrisc_ether_isr, IRQF_SHARED, ndev->name, ndev);
   if (retval) {
-    dev_err(&priv->ndev->dev, "Could not allocate interrupt %d\n", INTERRUPT_CAUSE_SOFTWARE);
+    dev_err(&priv->ndev->dev, "Could not allocate interrupt %d\n", priv->irq);
     if (priv->phy_dev)
       phy_disconnect(priv->phy_dev);
     priv->phy_dev = NULL;
