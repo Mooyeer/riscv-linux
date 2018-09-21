@@ -13,5 +13,10 @@ rm -f ../rocket-chip/riscv-tools/riscv-pk/build/payload.o
 make -C ../rocket-chip/riscv-tools/riscv-pk/build
 cp -p ../rocket-chip/riscv-tools/riscv-pk/build/bbl ../fpga/board/nexys4_ddr/boot_mmc.bin
 riscv64-unknown-elf-strip ../fpga/board/nexys4_ddr/boot_mmc.bin
+make ARCH=riscv -j 4 CONFIG_INITRAMFS_SOURCE="../buildroot/output/images/rootfs.cpio"
+rm -f ../rocket-chip/riscv-tools/riscv-pk/build/payload.o
+make -C ../rocket-chip/riscv-tools/riscv-pk/build
+cp -p ../rocket-chip/riscv-tools/riscv-pk/build/bbl ../fpga/board/nexys4_ddr/boot_buildroot.bin
+riscv64-unknown-elf-strip ../fpga/board/nexys4_ddr/boot_buildroot.bin
 #riscv64-unknown-elf-objdump -d -S -l vmlinux >vmlinux.dis &
 #riscv64-unknown-elf-objdump -d -l -S ../rocket-chip/riscv-tools/riscv-pk/build/bbl >../rocket-chip/riscv-tools/riscv-pk/build/bbl.dis
