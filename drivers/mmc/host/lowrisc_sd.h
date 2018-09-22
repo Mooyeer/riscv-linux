@@ -25,11 +25,14 @@ enum {resp0,resp1,resp2,resp3,
       detect_resp,xfr_addr_resp,irq_stat_resp,pll_resp,
       align_resp,clk_din_resp,arg_resp,cmd_i_resp,
       setting_resp,start_resp,reset_resp,blkcnt_resp,
-      blksize_resp,timeout_resp,clk_pll_resp,irq_en_resp};
+      blksize_resp,timeout_resp,clk_pll_resp,irq_en_resp,
+      dead1,dead2,dead3,from_dip};
 
 enum {SD_APP_OP_COND=41, data_buffer_offset=0x2000};
 
 enum {SD_CARD_RESP_END=1,SD_CARD_RW_END=2, SD_CARD_CARD_REMOVED_0=4, SD_CARD_CARD_INSERTED_0=8};
+
+enum {red_led = 1 << 21};
 
 struct lowrisc_sd_host {
   struct platform_device *pdev;
