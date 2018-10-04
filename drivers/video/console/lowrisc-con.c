@@ -26,8 +26,12 @@
  */
 
 #define LOWRISC_MEM	4096
+#define LOWRISC_REGS	8192
 #define LOWRISC_COLUMNS	128
-#define LOWRISC_ROWS	31
+#define LOWRISC_ROWS	32
+#define LOWRISC_REGS_SCROLL (0<<2)
+#define LOWRISC_REGS_XCUR   (2<<2)
+#define LOWRISC_REGS_YCUR   (3<<2)
 
 static uint16_t *hid_vga_ptr;
 static int oldxpos, oldypos;
@@ -45,7 +49,7 @@ static void myset(uint16_t *dest, int c, size_t n)
   if (dest < hid_vga_ptr || dest+n > hid_vga_ptr+LOWRISC_MEM)
     printk("out of range scroll set %lx\n", (long)dest);
   else
-    memset(dest, c, n);
+    memset(dest, c, n*sizeof(u16));
 }
 
 static const char *lowrisc_con_startup(void)
@@ -69,6 +73,26 @@ static void lowrisc_con_clear(struct vc_data *vc, int sy, int sx, int height, in
 {
 }
 
+static void lowrisc_con_cursor(struct vc_data *vc, int mode)
+{
+	int xcurs, ycurs;
+
+	switch (mode) {
+	case CM_ERASE:
+                hid_vga_ptr[LOWRISC_REGS+LOWRISC_REGS_YCUR] = 32;
+		break;
+
+	case CM_MOVE:
+	case CM_DRAW:
+                xcurs = vc->vc_pos >> 1;
+		ycurs = xcurs / LOWRISC_COLUMNS;
+		xcurs = xcurs % LOWRISC_COLUMNS;
+                hid_vga_ptr[LOWRISC_REGS+LOWRISC_REGS_XCUR] = xcurs;
+                hid_vga_ptr[LOWRISC_REGS+LOWRISC_REGS_YCUR] = ycurs;
+		break;
+	}
+}
+
 static void lowrisc_con_putc(struct vc_data *vc, int c, int ypos, int xpos)
 {
   extern void lowrisc_shadow_console_putchar(int);
@@ -86,32 +110,15 @@ static void lowrisc_con_putc(struct vc_data *vc, int c, int ypos, int xpos)
     }
   else
     oldxpos = xpos;
-  oldypos = ypos;
+#else
+  oldxpos = xpos;
 #endif
+  oldypos = ypos;
 }
 
 static void lowrisc_con_putcs(struct vc_data *vc, const unsigned short *s, int count, int ypos, int xpos)
 {
   while (count--) lowrisc_con_putc(vc, *s++, ypos, xpos++);
-}
-
-static void lowrisc_con_cursor(struct vc_data *vc, int mode)
-{
-	int xcurs, ycurs;
-
-	switch (mode) {
-	case CM_ERASE:
-		break;
-
-	case CM_MOVE:
-	case CM_DRAW:
-		xcurs = (vc->vc_pos - vc->vc_visible_origin) / 2;
-		ycurs = xcurs / LOWRISC_COLUMNS;
-		xcurs &= LOWRISC_COLUMNS-1;
-                hid_vga_ptr[LOWRISC_MEM*2+2*4] = xcurs;
-                hid_vga_ptr[LOWRISC_MEM*2+3*4] = ycurs;
-		break;
-	}
 }
 
 static bool lowrisc_con_scroll(struct vc_data *vc, unsigned int top,
