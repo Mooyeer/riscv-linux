@@ -95,7 +95,24 @@ static void lowrisc_con_putcs(struct vc_data *vc, const unsigned short *s, int c
   while (count--) lowrisc_con_putc(vc, *s++, ypos, xpos++);
 }
 
-static void lowrisc_con_cursor(struct vc_data *vc, int mode) { }
+static void lowrisc_con_cursor(struct vc_data *vc, int mode)
+{
+	int xcurs, ycurs;
+
+	switch (mode) {
+	case CM_ERASE:
+		break;
+
+	case CM_MOVE:
+	case CM_DRAW:
+		xcurs = (vc->vc_pos - vc->vc_visible_origin) / 2;
+		ycurs = xcurs / LOWRISC_COLUMNS;
+		xcurs &= LOWRISC_COLUMNS-1;
+                hid_vga_ptr[LOWRISC_MEM*2+2*4] = xcurs;
+                hid_vga_ptr[LOWRISC_MEM*2+3*4] = ycurs;
+		break;
+	}
+}
 
 static bool lowrisc_con_scroll(struct vc_data *vc, unsigned int top,
                            unsigned int bottom, enum con_scroll dir,
