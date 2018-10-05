@@ -71,6 +71,11 @@ static void lowrisc_con_deinit(struct vc_data *vc) { }
 
 static void lowrisc_con_clear(struct vc_data *vc, int sy, int sx, int height, int width)
 {
+  int y;
+  for (y = sy; y < height; y++)
+    {
+      myset(hid_vga_ptr+y*LOWRISC_COLUMNS+sx, 0, width);
+    }
 }
 
 static void lowrisc_con_cursor(struct vc_data *vc, int mode)
@@ -151,8 +156,19 @@ static bool lowrisc_con_scroll(struct vc_data *vc, unsigned int top,
 
 #else
 
-  mymove(hid_vga_ptr, hid_vga_ptr+LOWRISC_COLUMNS, LOWRISC_MEM-LOWRISC_COLUMNS);
-  myset(hid_vga_ptr+LOWRISC_MEM-LOWRISC_COLUMNS, 0, LOWRISC_COLUMNS);
+  switch (dir)
+    {
+    case SM_UP:
+      mymove(hid_vga_ptr, hid_vga_ptr+LOWRISC_COLUMNS, LOWRISC_MEM-LOWRISC_COLUMNS);
+      myset(hid_vga_ptr+LOWRISC_MEM-LOWRISC_COLUMNS, 0, LOWRISC_COLUMNS);
+      break;
+
+    case SM_DOWN:
+      mymove(hid_vga_ptr+LOWRISC_COLUMNS, hid_vga_ptr, LOWRISC_MEM-LOWRISC_COLUMNS);
+      myset(hid_vga_ptr, 0, LOWRISC_COLUMNS);
+      break;
+    }
+  
   return true;
 
 #endif        

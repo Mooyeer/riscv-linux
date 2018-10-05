@@ -46,6 +46,8 @@ struct lowrisc_kbd {
   unsigned short keycodes[128];
 };
 
+enum {scan_code_mask=0xFF, scan_released=0x100, keyb_empty=0x200, no_keyboard=0x400};
+
 const struct { char scan,lwr,upr; } scancode[] = {
 #include "lowrisc-scancode.h"
 };
@@ -56,17 +58,17 @@ static void lowrisc_keys_poll(struct input_polled_dev *dev)
   struct input_dev *input = dev->input;
   unsigned char c;
   uint32_t key = *lowrisc_kbd->keyb_base;
-  if ((1<<9) & ~key)
+  while (keyb_empty & ~key)
     {
       *lowrisc_kbd->keyb_base = 0; // bump FIFO location
-      key = *lowrisc_kbd->keyb_base & ~0x200;
-      c = scancode[key&~0x100].scan; /* convert to standard AT keyboard codes */
+      key = *lowrisc_kbd->keyb_base;
+      c = scancode[key&scan_code_mask].scan; /* convert to standard AT keyboard codes */
       if (c != 0x3A) // Ignore caps lock for now (and hopefully always)
         {
-          input_report_key(input, c, key & 0x100 ? 0 : 1);
+          input_report_key(input, c, key & scan_released ? 0 : 1);
           input_sync(input);
         }
-      pr_debug("input event key %c\n", scancode[key&~0x100].lwr);
+      pr_debug("input event key %c\n", scancode[key&scan_code_mask].lwr);
     }
 }
 
