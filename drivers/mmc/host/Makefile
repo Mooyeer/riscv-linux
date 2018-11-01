@@ -70,6 +70,10 @@ obj-$(CONFIG_MMC_TOSHIBA_PCI)	+= toshsd.o
 obj-$(CONFIG_MMC_BCM2835)	+= bcm2835.o
 obj-$(CONFIG_MMC_LOWRISC)       += lowrisc_sd.o
 
+ifeq ($(CONFIG_MMC_DEBUG),y)
+	CFLAGS-lowrisc_sd	+= -DDEBUG
+endif
+
 obj-$(CONFIG_MMC_REALTEK_PCI)	+= rtsx_pci_sdmmc.o
 obj-$(CONFIG_MMC_REALTEK_USB)	+= rtsx_usb_sdmmc.o
 

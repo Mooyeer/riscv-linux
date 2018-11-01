@@ -356,6 +356,7 @@ static void mdio_dir(struct mdiobb_ctrl *ctrl, int dir)
     priv->last_mdio_gpio |= MDIOCTRL_MDIOOEN_MASK; // input receiving
     
   eth_write(priv, MDIOCTRL_OFFSET, priv->last_mdio_gpio);
+  wmb(); // Does BOOM need this ?
 }
 
 static int mdio_get(struct mdiobb_ctrl *ctrl)
@@ -374,6 +375,7 @@ static void mdio_set(struct mdiobb_ctrl *ctrl, int what)
     priv->last_mdio_gpio &= ~MDIOCTRL_MDIOOUT_MASK;
     
   eth_write(priv, MDIOCTRL_OFFSET, priv->last_mdio_gpio);
+  wmb(); // Does BOOM need this ?
 }
 
 static void mdc_set(struct mdiobb_ctrl *ctrl, int what)
@@ -385,6 +387,7 @@ static void mdc_set(struct mdiobb_ctrl *ctrl, int what)
     priv->last_mdio_gpio &= ~MDIOCTRL_MDIOCLK_MASK;
     
   eth_write(priv, MDIOCTRL_OFFSET, priv->last_mdio_gpio);
+  wmb(); // Does BOOM need this ?
 }
 
 #ifdef MDIO_RESET

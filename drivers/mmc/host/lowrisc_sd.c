@@ -30,8 +30,6 @@
 #include "lowrisc_sd.h"
 
 #define DRIVER_NAME "lowrisc-mmc"
-#define LOG(l) printk l
-#define LOGV(l) pr_debug l
 
 static volatile uint64_t *led_sd_base;
 static uint32_t led_last;
@@ -242,6 +240,7 @@ void sd_irq_en(struct lowrisc_sd_host *host, int mask)
 {
   volatile uint64_t *sd_base = host->ioaddr;
   sd_base[irq_en_reg] = mask;
+  wmb();
   host->int_en = mask;
   pr_debug("sd_irq_en(%X)\n", mask);
 }
@@ -299,7 +298,7 @@ static void lowrisc_sd_cmd_irq(struct lowrisc_sd_host *host)
 	struct mmc_command *cmd = host->cmd;
         volatile uint64_t *sd_base = host->ioaddr;
 
-	LOGV (("lowrisc_sd_cmd_irq\n"));
+	pr_debug("lowrisc_sd_cmd_irq\n");
 	
 	if (!host->cmd) {
 		dev_warn(&host->pdev->dev, "Spurious CMD irq\n");
@@ -307,10 +306,10 @@ static void lowrisc_sd_cmd_irq(struct lowrisc_sd_host *host)
 	}
 	host->cmd = NULL;
 
-        LOGV (("lowrisc_sd_cmd_irq IRQ line %d\n", __LINE__));
+        pr_debug("lowrisc_sd_cmd_irq IRQ line %d\n", __LINE__);
 	if (cmd->flags & MMC_RSP_PRESENT && cmd->flags & MMC_RSP_136) {
 	  int i;
-	  LOGV (("lowrisc_sd_cmd_irq IRQ line %d\n", __LINE__));
+	  pr_debug("lowrisc_sd_cmd_irq IRQ line %d\n", __LINE__);
 		/* R2 */
 	  for (i = 0;i < 4;i++)
 	    {
@@ -319,12 +318,12 @@ static void lowrisc_sd_cmd_irq(struct lowrisc_sd_host *host)
 	      cmd->resp[i] |= sd_base[resp0 + (2-i)] >> 24;
 	    } 
 	} else if (cmd->flags & MMC_RSP_PRESENT) {
-	  LOGV (("lowrisc_sd_cmd_irq IRQ line %d\n", __LINE__));
+	  pr_debug("lowrisc_sd_cmd_irq IRQ line %d\n", __LINE__);
 		/* R1, R1B, R3, R6, R7 */
 	  cmd->resp[0] = sd_base[resp0];
 	}
 
-LOGV (("Command IRQ complete %d %d %x\n", cmd->opcode, cmd->error, cmd->flags));
+pr_debug("Command IRQ complete %d %d %x\n", cmd->opcode, cmd->error, cmd->flags);
 
 	/* If there is data to handle we will
 	 * finish the request in the mmc_data_end_irq handler.*/
@@ -341,7 +340,7 @@ static void lowrisc_sd_data_end_irq(struct lowrisc_sd_host *host)
 	struct mmc_data *data = host->data;
 	unsigned long flags;
 	
-	LOGV (("lowrisc_sd_data_end_irq\n"));
+	pr_debug("lowrisc_sd_data_end_irq\n");
 
 	host->data = NULL;
 
@@ -390,8 +389,8 @@ static void lowrisc_sd_data_end_irq(struct lowrisc_sd_host *host)
 	else
 		data->bytes_xfered = 0;
 
-	LOGV (("Completed data request xfr=%d\n",
-	      data->bytes_xfered));
+	pr_debug("Completed data request xfr=%d\n",
+	      data->bytes_xfered);
 
         //	iowrite16(0, host->ioaddr + SD_STOPINTERNAL);
 
@@ -411,73 +410,74 @@ static irqreturn_t lowrisc_sd_irq(int irq, void *dev_id)
 
 	/* nothing to do: it's not our IRQ */
 	if (!int_reg) {
+                pr_debug("nothing to do: it's not our IRQ (?)\n");
 		ret = IRQ_NONE;
 		goto irq_end;
 	}
 
-	LOGV (("lowrisc_sd IRQ status:%x enabled:%x\n", int_status, host->int_en));
+	pr_debug("lowrisc_sd IRQ status:%x enabled:%x\n", int_status, host->int_en);
 
 	if (sd_base[wait_resp] >= sd_base[timeout_resp]) {
 		error = -ETIMEDOUT;
-		LOGV (("lowrisc_sd timeout %lld clocks\n", sd_base[timeout_resp]));
+		pr_debug("lowrisc_sd timeout %lld clocks\n", sd_base[timeout_resp]);
 	} else if (int_reg & 0) {
 		error = -EILSEQ;
 		dev_err(&host->pdev->dev, "BadCRC\n");
         }
         
-        LOGV (("lowrisc_sd IRQ line %d\n", __LINE__));
+        pr_debug("lowrisc_sd IRQ line %d\n", __LINE__);
 
 	if (error) {
-	  LOGV (("lowrisc_sd IRQ line %d\n", __LINE__));
+	  pr_debug("lowrisc_sd IRQ line %d\n", __LINE__);
 		if (host->cmd)
 			host->cmd->error = error;
 
 		if (error == -ETIMEDOUT) {
-		  LOGV (("lowrisc_sd IRQ line %d\n", __LINE__));
+		  pr_debug("lowrisc_sd IRQ line %d\n", __LINE__);
                   sd_cmd_start(host, 0);
                   sd_setting(host, 0);
 		} else {
-		  LOGV (("lowrisc_sd IRQ line %d\n", __LINE__));
+		  pr_debug("lowrisc_sd IRQ line %d\n", __LINE__);
 			lowrisc_sd_init(host);
 			__lowrisc_sd_set_ios(host->mmc, &host->mmc->ios);
 			goto irq_end;
 		}
 	}
 
-        LOGV (("lowrisc_sd IRQ line %d\n", __LINE__));
+        pr_debug("lowrisc_sd IRQ line %d\n", __LINE__);
 
         /* Card insert/remove. The mmc controlling code is stateless. */
 	if (int_reg & SD_CARD_CARD_REMOVED_0)
 	  {
-	    int mask = (host->int_en & ~SD_CARD_CARD_REMOVED_0) | SD_CARD_CARD_INSERTED_0;
+	    int mask = (host->int_en & ~SD_CARD_CARD_REMOVED_0); // | SD_CARD_CARD_INSERTED_0;
 	    sd_irq_en(host, mask);
 	    printk("Card removed, mask changed to %d\n", mask);
 	    mmc_detect_change(host->mmc, 1);
 	  }
 	
-        LOGV (("lowrisc_sd IRQ line %d\n", __LINE__));
+        pr_debug("lowrisc_sd IRQ line %d\n", __LINE__);
 	if (int_reg & SD_CARD_CARD_INSERTED_0)
 	  {
-	    int mask = (host->int_en & ~SD_CARD_CARD_INSERTED_0) | SD_CARD_CARD_REMOVED_0 ;
+	    int mask = (host->int_en & ~SD_CARD_CARD_INSERTED_0); // | SD_CARD_CARD_REMOVED_0 ;
 	    sd_irq_en(host, mask);
 	    printk("Card inserted, mask changed to %d\n", mask);
 	    lowrisc_sd_init(host);
 	    mmc_detect_change(host->mmc, 1);
 	  }
 
-        LOGV (("lowrisc_sd IRQ line %d\n", __LINE__));
+        pr_debug("lowrisc_sd IRQ line %d\n", __LINE__);
 	/* Command completion */
 	if (int_reg & SD_CARD_RESP_END) {
-	  LOGV (("lowrisc_sd IRQ line %d\n", __LINE__));
+	  pr_debug("lowrisc_sd IRQ line %d\n", __LINE__);
 
 		lowrisc_sd_cmd_irq(host);
 		host->int_en &= ~SD_CARD_RESP_END;
 	}
 
-        LOGV (("lowrisc_sd IRQ line %d\n", __LINE__));
+        pr_debug("lowrisc_sd IRQ line %d\n", __LINE__);
 	/* Data transfer completion */
 	if (int_reg & SD_CARD_RW_END) {
-	  LOGV (("lowrisc_sd IRQ line %d\n", __LINE__));
+	  pr_debug("lowrisc_sd IRQ line %d\n", __LINE__);
 
 		lowrisc_sd_data_end_irq(host);
 		host->int_en &= ~SD_CARD_RW_END;
@@ -496,7 +496,7 @@ static void lowrisc_sd_start_cmd(struct lowrisc_sd_host *host, struct mmc_comman
   volatile uint64_t *sd_base = host->ioaddr;
   spin_lock(&host->lock);
 
-  LOGV (("Command opcode: %d\n", cmd->opcode));
+  pr_debug("Command opcode: %d\n", cmd->opcode);
 /*
   if (cmd->opcode == MMC_STOP_TRANSMISSION) {
     sd_cmd(host, SD_STOPINT_ISSUE_CMD12);
@@ -532,7 +532,7 @@ static void lowrisc_sd_start_cmd(struct lowrisc_sd_host *host, struct mmc_comman
       /* placeholder */
     }
 
-  LOGV (("testing data flags\n"));
+  pr_debug("testing data flags\n");
   if (data) {
     setting |= 0x4;
     if (data->flags & MMC_DATA_READ)
@@ -543,7 +543,7 @@ static void lowrisc_sd_start_cmd(struct lowrisc_sd_host *host, struct mmc_comman
       }
   }
 
-  LOGV (("writing registers\n"));
+  pr_debug("writing registers\n");
   /* Send the command */
   sd_reset(host, 0,1,0,1);
   sd_align(host, 0);
@@ -555,18 +555,18 @@ static void lowrisc_sd_start_cmd(struct lowrisc_sd_host *host, struct mmc_comman
   sd_timeout(host, timeout);
   /* start the transaction */ 
   sd_cmd_start(host, 1);
-  LOGV (("enabling interrupt\n"));
+  pr_debug("enabling interrupt\n");
   sd_irq_en(host, sd_base[irq_en_resp] | SD_CARD_RESP_END);
 spin_unlock(&host->lock);
- LOGV (("leaving lowrisc_sd_start_cmd\n"));
+ pr_debug("leaving lowrisc_sd_start_cmd\n");
 }
 
 static void lowrisc_sd_start_data(struct lowrisc_sd_host *host, struct mmc_data *data)
 {
 	unsigned int flags = SG_MITER_ATOMIC;
 
-	LOGV (("setup data transfer: blocksize %08x  nr_blocks %d, offset: %08x\n",
-	      data->blksz, data->blocks, data->sg->offset));
+	pr_debug("setup data transfer: blocksize %08x  nr_blocks %d, offset: %08x\n",
+	      data->blksz, data->blocks, data->sg->offset);
 
 	host->data = data;
 

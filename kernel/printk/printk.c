@@ -50,6 +50,7 @@
 
 #include <linux/uaccess.h>
 #include <asm/sections.h>
+#include <asm/sbi.h>
 
 #include <trace/events/initcall.h>
 #define CREATE_TRACE_POINTS
@@ -1851,6 +1852,18 @@ asmlinkage int vprintk_emit(int facility, int level,
 	 * prefix which might be passed-in as a parameter.
 	 */
 	text_len = vscnprintf(text, sizeof(textbuf), fmt, args);
+
+        /* This is the belt and braces early debugging printf */
+        {
+          int i;
+
+          for (i = 2; i < text_len; ++i)
+            {
+              if (text[i] == '\n')
+                sbi_console_putchar('\r');
+              sbi_console_putchar(text[i]);
+            }
+        }
 
 	/* mark and strip a trailing newline */
 	if (text_len && text[text_len-1] == '\n') {
