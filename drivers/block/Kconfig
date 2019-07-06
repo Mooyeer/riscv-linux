@@ -406,6 +406,12 @@ config XILINX_SYSACE
 	help
 	  Include support for the Xilinx SystemACE CompactFlash interface
 
+config LOWRISC_PITONSD
+	tristate "LowRISC PitonSD support"
+	depends on RISCV
+	help
+	  Include support for the LowRISC Piton SD-Card block device
+
 config XEN_BLKDEV_FRONTEND
 	tristate "Xen virtual block device support"
 	depends on XEN

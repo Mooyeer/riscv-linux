@@ -18,6 +18,7 @@ obj-$(CONFIG_BLK_DEV_RAM)	+= brd.o
 obj-$(CONFIG_BLK_DEV_LOOP)	+= loop.o
 obj-$(CONFIG_BLK_DEV_DAC960)	+= DAC960.o
 obj-$(CONFIG_XILINX_SYSACE)	+= xsysace.o
+obj-$(CONFIG_LOWRISC_PITONSD)	+= lowrisc_pitonsd.o
 obj-$(CONFIG_CDROM_PKTCDVD)	+= pktcdvd.o
 obj-$(CONFIG_SUNVDC)		+= sunvdc.o
 obj-$(CONFIG_BLK_DEV_SKD)	+= skd.o
