@@ -35,8 +35,8 @@
  *
  *    The FSM itself is atomic-safe code which can be run from any
  *    context.  The general process flow is:
- *    1. obtain the ace->lock spinlock.
- *    2. loop on pitonsd_fsm_dostate() until the ace->fsm_continue flag is
+ *    1. obtain the sdpiton->lock spinlock.
+ *    2. loop on pitonsd_fsm_dostate() until the sdpiton->fsm_continue flag is
  *       cleared.
  *    3. release the lock.
  *
@@ -102,9 +102,29 @@ MODULE_DESCRIPTION("LowRISC_piton_sd device driver");
 MODULE_LICENSE("GPL");
 
 /* LowRISC_piton_sd register definitions */
-#define _piton_sd_BUSMODE (0x09)
+#define _piton_sd_ADDR_SD     (0x00)
+#define _piton_sd_ADDR_DMA    (0x01)
+#define _piton_sd_BLKCNT      (0x02)
+#define _piton_sd_CTRL        (0x3)
+#define _piton_sd_LED         (0xF)
 
-#define _piton_sd_STATUS (0x02)
+#define _piton_sd_CTRL_REQ_VALID          (0x00000001)
+#define _piton_sd_CTRL_REQ_WRITE          (0x00000002)
+#define _piton_sd_CTRL_IRQ_EN             (0x00000004)
+#define _piton_sd_CTRL_SD_RST_EN          (0x00000008)
+
+#define _piton_sd_ADDR_SD_F   (0x00)
+#define _piton_sd_ADDR_DMA_F  (0x01)
+#define _piton_sd_STATUS      (0x02)
+#define _piton_sd_ERROR       (0x03)
+#define _piton_sd_INIT_STATE  (0x04)
+#define _piton_sd_COUNTER     (0x05)
+#define _piton_sd_INIT_FSM    (0x06)
+#define _piton_sd_TRAN_STATE  (0x07)
+#define _piton_sd_TRAN_FSM    (0x08)
+
+#define _piton_sd_VERSION     (0x09)
+
 #define _piton_sd_STATUS_REQ          (0x00000001)
 #define _piton_sd_STATUS_WR           (0x00000002)
 #define _piton_sd_STATUS_IRQ_EN       (0x00000004)	/* config controller error */
@@ -114,23 +134,11 @@ MODULE_LICENSE("GPL");
 #define _piton_sd_STATUS_SDHC         (0x00000040)
 #define _piton_sd_STATUS_CFDETECT     (0x00000080)
 
-#define _piton_sd_ERROR  (0x03)
-
-#define _piton_sd_VERSION (0x16)
 #define _piton_sd_VERSION_REVISION_MASK (0x00FF)
 #define _piton_sd_VERSION_MINOR_MASK    (0x0F00)
 #define _piton_sd_VERSION_MAJOR_MASK    (0xF000)
 
-#define _piton_sd_CTRL (0x3)
-#define _piton_sd_CTRL_REQ            (0x0001)
-#define _piton_sd_CTRL_WR             (0x0002)
-#define _piton_sd_CTRL_IRQ_EN         (0x0004)
-#define _piton_sd_CTRL_CFGRESET       (0x0008)
-
 #define _piton_sd_NUM_MINORS 16
-#define _piton_sd_SECTOR_SIZE (512)
-#define _piton_sd_FIFO_SIZE (32)
-#define _piton_sd_BUF_PER_SECTOR (_piton_sd_SECTOR_SIZE / _piton_sd_FIFO_SIZE)
 
 struct pitonsd_reg_ops;
 
@@ -153,18 +161,15 @@ struct pitonsd_device {
 	struct request *req;	/* request being processed */
 	void *data_ptr;		/* pointer to I/O buffer */
 	int data_count;		/* number of buffers remaining */
+        uint data_pos;          /* data (sector) position */
 	int data_result;	/* Result of transfer; 0 := success */
 
-	int id_req_count;	/* count of id requests */
-	int id_result;
-	struct completion id_completion;	/* used when id req finishes */
 	int in_irq;
 
 	/* Details of hardware device */
-	resource_size_t physaddr;
-	void __iomem *baseaddr;
+        resource_size_t physaddr, physaddrend;
+        volatile u64 __iomem *baseaddr, *ioptr;
 	int irq;
-	int lock_count;
 
 	/* Block device data structures */
 	spinlock_t lock;
@@ -178,23 +183,6 @@ struct pitonsd_device {
 
 static DEFINE_MUTEX(pitonsd_mutex);
 static int pitonsd_major;
-
-/* ---------------------------------------------------------------------
- * Low level register access
- */
-
-static inline u64 pitonsd_in(struct pitonsd_device *ace, int reg)
-{
-  volatile uint64_t *sd_base = ace->baseaddr;
-  return sd_base[reg];
-}
-
-static inline void pitonsd_out(struct pitonsd_device *ace, int reg, u64 val)
-{
-  volatile uint64_t *sd_base = ace->baseaddr;
-  sd_base[reg] = val;
-  return;
-}
 
 /* ---------------------------------------------------------------------
  * Debug support functions
@@ -225,31 +213,21 @@ static inline void pitonsd_dump_mem(void *base, int len)
 }
 #endif
 
-static void pitonsd_dump_regs(struct pitonsd_device *ace)
+static void pitonsd_dump_regs(struct pitonsd_device *sdpiton)
 {
-	dev_info(ace->dev,
-		 "    ctrl:  %.8x  seccnt/cmd: %.4x      ver:%.4x\n"
-		 "    status:%.8x  mpu_lba:%.8x  busmode:%4x\n"
-		 "    error: %.8x  cfg_lba:%.8x  fatstat:%.4x\n",
-		 pitonsd_in(ace, _piton_sd_CTRL),
-		 pitonsd_in(ace, _piton_sd_SECCNTCMD),
-		 pitonsd_in(ace, _piton_sd_VERSION),
-		 pitonsd_in(ace, _piton_sd_STATUS),
-		 pitonsd_in(ace, _piton_sd_MPULBA),
-		 pitonsd_in(ace, _piton_sd_BUSMODE),
-		 pitonsd_in(ace, _piton_sd_ERROR),
-		 pitonsd_in(ace, _piton_sd_CFGLBA), pitonsd_in(ace, _piton_sd_FATSTAT));
-}
-
-static void pitonsd_fix_driveid(u16 *id)
-{
-#if defined(__BIG_ENDIAN)
-	int i;
-
-	/* All half words have wrong byte order; swap the bytes */
-	for (i = 0; i < ATA_ID_WORDS; i++, id++)
-		*id = le16_to_cpu(*id);
-#endif
+	dev_info(sdpiton->dev,
+		 "    sd_f:  0x%llx  dma_f: 0x%llx   status: 0x%llx\n"
+		 "    resp_vec: 0x%llx  init_state: 0x%llx  counter: 0x%llx\n"
+		 "    init_fsm: 0x%llx  tran_state: 0x%llx  tran_fsm: 0x%llx\n",
+		 sdpiton->baseaddr[0],
+		 sdpiton->baseaddr[1],
+		 sdpiton->baseaddr[2],
+		 sdpiton->baseaddr[3],
+		 sdpiton->baseaddr[4],
+		 sdpiton->baseaddr[5],
+		 sdpiton->baseaddr[6],
+		 sdpiton->baseaddr[7],
+                 sdpiton->baseaddr[8]);
 }
 
 /* ---------------------------------------------------------------------
@@ -268,32 +246,67 @@ static void pitonsd_fix_driveid(u16 *id)
 #define _piton_sd_FSM_STATE_REQ_LOCK           1
 #define _piton_sd_FSM_STATE_WAIT_LOCK          2
 #define _piton_sd_FSM_STATE_WAIT_CFREADY       3
-#define _piton_sd_FSM_STATE_IDENTIFY_PREPARE   4
-#define _piton_sd_FSM_STATE_IDENTIFY_TRANSFER  5
-#define _piton_sd_FSM_STATE_IDENTIFY_COMPLETE  6
-#define _piton_sd_FSM_STATE_REQ_PREPARE        7
+#define _piton_sd_FSM_STATE_REQ_PREPARE        6
+#define _piton_sd_FSM_STATE_REQ_NEXT           7
 #define _piton_sd_FSM_STATE_REQ_TRANSFER       8
 #define _piton_sd_FSM_STATE_REQ_COMPLETE       9
 #define _piton_sd_FSM_STATE_ERROR             10
 #define _piton_sd_FSM_NUM_STATES              11
 
+#ifdef DEBUG
+static void sdpiton_sector_dump(struct pitonsd_device *sdpiton, uint32_t count)
+{
+  int i;
+  for (i = 0; i < count/8; i+=4)
+    printk("%x: %.16llx %.16llx %.16llx %.16llx\n",
+           sdpiton->data_pos*512 + i*8, sdpiton->ioptr[i], sdpiton->ioptr[i+1], sdpiton->ioptr[i+2], sdpiton->ioptr[i+3]);
+}
+
+static void sdpiton_self_test(struct pitonsd_device *sdpiton, uint8_t *buff, uint32_t sector, uint32_t count)
+{
+  volatile uint64_t *sd_base = sdpiton->baseaddr;
+  volatile uint64_t *sd_bram = sdpiton->baseaddr + 0x1000;
+  uint64_t vec;
+  uint64_t stat = 0xDEADBEEF;
+  uint64_t mask = (1 << count) - 1;
+  sd_base[0] = sector;
+  sd_base[1] = 0;
+  sd_base[2] = count;
+  sd_base[3] = 1;
+  sd_base[15] = sector;
+  sd_base[3] = 0;
+  do
+    {
+      stat = sd_base[2];
+    }
+  while (16 & ~stat);
+  sd_base[15] = 0;
+  vec = sd_base[3] & mask;
+  memcpy(buff, (void*)sd_bram, count*512);
+  if (vec!=mask)
+    printk("Sector = %d, count = %d, err = %llx\n", sector, count, vec);
+  else
+    sdpiton_sector_dump(sdpiton, count*512);
+}
+#endif
+
 /* Set flag to exit FSM loop and reschedule tasklet */
-static inline void pitonsd_fsm_yield(struct pitonsd_device *ace)
+static inline void pitonsd_fsm_yield(struct pitonsd_device *sdpiton)
 {
 	pr_debug("pitonsd_fsm_yield()\n");
-	tasklet_schedule(&ace->fsm_tasklet);
-	ace->fsm_continue_flag = 0;
+	tasklet_schedule(&sdpiton->fsm_tasklet);
+	sdpiton->fsm_continue_flag = 0;
 }
 
 /* Set flag to exit FSM loop and wait for IRQ to reschedule tasklet */
-static inline void pitonsd_fsm_yieldirq(struct pitonsd_device *ace)
+static inline void pitonsd_fsm_yieldirq(struct pitonsd_device *sdpiton)
 {
 	printk("pitonsd_fsm_yieldirq()\n");
 
-	if (!ace->irq)
+	if (!sdpiton->irq)
 		/* No IRQ assigned, so need to poll */
-		tasklet_schedule(&ace->fsm_tasklet);
-	ace->fsm_continue_flag = 0;
+		tasklet_schedule(&sdpiton->fsm_tasklet);
+	sdpiton->fsm_continue_flag = 0;
 }
 
 /* Get the next read/write request; ending requests that we don't handle */
@@ -301,6 +314,8 @@ static struct request *pitonsd_get_next_request(struct request_queue *q)
 {
 	struct request *req;
 
+        printk("pitonsd_get_next_request()\n");
+        
 	while ((req = blk_peek_request(q)) != NULL) {
 		if (!blk_rq_is_passthrough(req))
 			break;
@@ -310,334 +325,226 @@ static struct request *pitonsd_get_next_request(struct request_queue *q)
 	return req;
 }
 
-static void pitonsd_fsm_dostate(struct pitonsd_device *ace)
+static void pitonsd_fsm_dostate(struct pitonsd_device *sdpiton)
 {
-	struct request *req;
 	u32 status;
-	u16 val;
-	int count;
 
-#if defined(DEBUG)
-	printk("fsm_state=%i, id_req_count=%i\n",
-		ace->fsm_state, ace->id_req_count);
-#endif
-
-	/* Verify that there is actually a CF in the slot. If not, then
+	/* Verify that there is actually a SD-Card in the slot. If not, then
 	 * bail out back to the idle state and wake up all the waiters */
-	status = pitonsd_in(ace, _piton_sd_STATUS);
-	if ((status & _piton_sd_STATUS_CFDETECT) == 0) {
-		ace->fsm_state = _piton_sd_FSM_STATE_IDLE;
-		ace->media_change = 1;
-		set_capacity(ace->gd, 0);
-		dev_info(ace->dev, "No CF in slot\n");
+	status = sdpiton->baseaddr[_piton_sd_STATUS];
+	if ((_piton_sd_STATUS_CFDETECT & ~status) == 0) {
+		sdpiton->fsm_state = _piton_sd_FSM_STATE_IDLE;
+		sdpiton->media_change = 1;
+		set_capacity(sdpiton->gd, 0);
+		dev_info(sdpiton->dev, "No SD-Card in slot\n");
 
 		/* Drop all in-flight and pending requests */
-		if (ace->req) {
-			__blk_end_request_all(ace->req, BLK_STS_IOERR);
-			ace->req = NULL;
+		if (sdpiton->req) {
+			__blk_end_request_all(sdpiton->req, BLK_STS_IOERR);
+			sdpiton->req = NULL;
 		}
-		while ((req = blk_fetch_request(ace->queue)) != NULL)
-			__blk_end_request_all(req, BLK_STS_IOERR);
+		while ((sdpiton->req = blk_fetch_request(sdpiton->queue)) != NULL)
+			__blk_end_request_all(sdpiton->req, BLK_STS_IOERR);
 
 		/* Drop back to IDLE state and notify waiters */
-		ace->fsm_state = _piton_sd_FSM_STATE_IDLE;
-		ace->id_result = -EIO;
-		while (ace->id_req_count) {
-			complete(&ace->id_completion);
-			ace->id_req_count--;
-		}
+		sdpiton->fsm_state = _piton_sd_FSM_STATE_IDLE;
 	}
 
-	switch (ace->fsm_state) {
+	switch (sdpiton->fsm_state) {
 	case _piton_sd_FSM_STATE_IDLE:
 		/* See if there is anything to do */
-		if (ace->id_req_count || pitonsd_get_next_request(ace->queue)) {
-			ace->fsm_iter_num++;
-			ace->fsm_state = _piton_sd_FSM_STATE_REQ_LOCK;
-			mod_timer(&ace->stall_timer, jiffies + HZ);
-			if (!timer_pending(&ace->stall_timer))
-				add_timer(&ace->stall_timer);
+		if (pitonsd_get_next_request(sdpiton->queue)) {
+			sdpiton->fsm_iter_num++;
+			sdpiton->fsm_state = _piton_sd_FSM_STATE_REQ_LOCK;
+			mod_timer(&sdpiton->stall_timer, jiffies + HZ);
+			if (!timer_pending(&sdpiton->stall_timer))
+				add_timer(&sdpiton->stall_timer);
 			break;
 		}
-		del_timer(&ace->stall_timer);
-		ace->fsm_continue_flag = 0;
+		del_timer(&sdpiton->stall_timer);
+		sdpiton->fsm_continue_flag = 0;
 		break;
 
 	case _piton_sd_FSM_STATE_REQ_LOCK:
-		if (pitonsd_in(ace, _piton_sd_STATUS) & _piton_sd_STATUS_MPULOCK) {
-			/* Already have the lock, jump to next state */
-			ace->fsm_state = _piton_sd_FSM_STATE_WAIT_CFREADY;
-			break;
-		}
-
-		/* Request the lock */
-		val = pitonsd_in(ace, _piton_sd_CTRL);
-		pitonsd_out(ace, _piton_sd_CTRL, val | _piton_sd_CTRL_LOCKREQ);
-		ace->fsm_state = _piton_sd_FSM_STATE_WAIT_LOCK;
-		break;
-
-	case _piton_sd_FSM_STATE_WAIT_LOCK:
-		if (pitonsd_in(ace, _piton_sd_STATUS) & _piton_sd_STATUS_MPULOCK) {
-			/* got the lock; move to next state */
-			ace->fsm_state = _piton_sd_FSM_STATE_WAIT_CFREADY;
-			break;
-		}
-
-		/* wait a bit for the lock */
-		pitonsd_fsm_yield(ace);
+			sdpiton->fsm_state = _piton_sd_FSM_STATE_WAIT_CFREADY;
 		break;
 
 	case _piton_sd_FSM_STATE_WAIT_CFREADY:
-		status = pitonsd_in(ace, _piton_sd_STATUS);
-		if (!(status & _piton_sd_STATUS_RDYFORCFCMD) ||
-		    (status & _piton_sd_STATUS_CFBSY)) {
-			/* CF card isn't ready; it needs to be polled */
-			pitonsd_fsm_yield(ace);
+		status = sdpiton->baseaddr[_piton_sd_STATUS];
+		if (!(status & _piton_sd_STATUS_RDYFORCFCMD)) {
+			/* SD card isn't ready; it needs to be polled */
+			pitonsd_fsm_yield(sdpiton);
 			break;
 		}
 
-		/* Device is ready for command; determine what to do next */
-		if (ace->id_req_count)
-			ace->fsm_state = _piton_sd_FSM_STATE_IDENTIFY_PREPARE;
-		else
-			ace->fsm_state = _piton_sd_FSM_STATE_REQ_PREPARE;
-		break;
-
-	case _piton_sd_FSM_STATE_IDENTIFY_PREPARE:
-		/* Send identify command */
-		ace->fsm_task = _piton_sd_TASK_IDENTIFY;
-		ace->data_ptr = ace->cf_id;
-		ace->data_count = _piton_sd_BUF_PER_SECTOR;
-		pitonsd_out(ace, _piton_sd_SECCNTCMD, _piton_sd_SECCNTCMD_IDENTIFY);
-
-		/* As per datasheet, put config controller in reset */
-		val = pitonsd_in(ace, _piton_sd_CTRL);
-		pitonsd_out(ace, _piton_sd_CTRL, val | _piton_sd_CTRL_CFGRESET);
-
-		/* irq handler takes over from this point; wait for the
-		 * transfer to complete */
-		ace->fsm_state = _piton_sd_FSM_STATE_IDENTIFY_TRANSFER;
-		pitonsd_fsm_yieldirq(ace);
-		break;
-
-	case _piton_sd_FSM_STATE_IDENTIFY_TRANSFER:
-		/* Check that the sysace is ready to receive data */
-		status = pitonsd_in(ace, _piton_sd_STATUS);
-		if (status & _piton_sd_STATUS_CFBSY) {
-			printk("CFBSY set; t=%i iter=%i dc=%i\n",
-				ace->fsm_task, ace->fsm_iter_num,
-				ace->data_count);
-			pitonsd_fsm_yield(ace);
-			break;
-		}
-		if (!(status & _piton_sd_STATUS_DATABUFRDY)) {
-			pitonsd_fsm_yield(ace);
-			break;
-		}
-
-		/* Transfer the next buffer */
-	        pitonsd_in(ace, ace->data_count--);
-
-		/* If there are still buffers to be transfers; jump out here */
-		if (ace->data_count != 0) {
-			pitonsd_fsm_yieldirq(ace);
-			break;
-		}
-
-		/* transfer finished; kick state machine */
-		printk("identify finished\n");
-		ace->fsm_state = _piton_sd_FSM_STATE_IDENTIFY_COMPLETE;
-		break;
-
-	case _piton_sd_FSM_STATE_IDENTIFY_COMPLETE:
-		pitonsd_fix_driveid(ace->cf_id);
-		pitonsd_dump_mem(ace->cf_id, 512);	/* Debug: Dump out disk ID */
-
-		if (ace->data_result) {
-			/* Error occurred, disable the disk */
-			ace->media_change = 1;
-			set_capacity(ace->gd, 0);
-			dev_err(ace->dev, "error fetching CF id (%i)\n",
-				ace->data_result);
-		} else {
-			ace->media_change = 0;
-
-			/* Record disk parameters */
-			set_capacity(ace->gd,
-				ata_id_u32(ace->cf_id, ATA_ID_LBA_CAPACITY));
-			dev_info(ace->dev, "capacity: %i sectors\n",
-				ata_id_u32(ace->cf_id, ATA_ID_LBA_CAPACITY));
-		}
-
-		/* We're done, drop to IDLE state and notify waiters */
-		ace->fsm_state = _piton_sd_FSM_STATE_IDLE;
-		ace->id_result = ace->data_result;
-		while (ace->id_req_count) {
-			complete(&ace->id_completion);
-			ace->id_req_count--;
-		}
+                sdpiton->fsm_state = _piton_sd_FSM_STATE_REQ_PREPARE;
 		break;
 
 	case _piton_sd_FSM_STATE_REQ_PREPARE:
-		req = pitonsd_get_next_request(ace->queue);
-		if (!req) {
-			ace->fsm_state = _piton_sd_FSM_STATE_IDLE;
+		sdpiton->req = pitonsd_get_next_request(sdpiton->queue);
+		if (!sdpiton->req) {
+			sdpiton->fsm_state = _piton_sd_FSM_STATE_IDLE;
 			break;
 		}
-		blk_start_request(req);
+		blk_start_request(sdpiton->req);
 
 		/* Okay, it's a data request, set it up for transfer */
-		dev_dbg(ace->dev,
-			"request: sec=%llx hcnt=%x, ccnt=%x, dir=%i\n",
-			(unsigned long long)blk_rq_pos(req),
-			blk_rq_sectors(req), blk_rq_cur_sectors(req),
-			rq_data_dir(req));
+		dev_dbg(sdpiton->dev,
+			"request: sec=0x%llx hcnt=0x%x, ccnt=0x%x, dir=0x%i\n",
+			(unsigned long long)blk_rq_pos(sdpiton->req),
+			blk_rq_sectors(sdpiton->req), blk_rq_cur_sectors(sdpiton->req),
+			rq_data_dir(sdpiton->req));
 
-		ace->req = req;
-		ace->data_ptr = bio_data(req->bio);
-		ace->data_count = blk_rq_cur_sectors(req) * _piton_sd_BUF_PER_SECTOR;
-		pitonsd_out(ace, _piton_sd_MPULBA, blk_rq_pos(req) & 0x0FFFFFFF);
+		sdpiton->fsm_state = _piton_sd_FSM_STATE_REQ_NEXT;
+		break;
 
-		count = blk_rq_sectors(req);
-		if (rq_data_dir(req)) {
+        case _piton_sd_FSM_STATE_REQ_NEXT:
+		sdpiton->data_ptr = bio_data(sdpiton->req->bio);
+		sdpiton->data_count = blk_rq_cur_sectors(sdpiton->req);
+                sdpiton->data_pos = blk_rq_pos(sdpiton->req);
+
+                printk("Sector count = %d\n", sdpiton->data_count);
+		if (rq_data_dir(sdpiton->req)) {
 			/* Kick off write request */
 			printk("write data\n");
-			ace->fsm_task = _piton_sd_TASK_WRITE;
-			pitonsd_out(ace, _piton_sd_SECCNTCMD,
-				count | _piton_sd_SECCNTCMD_WRITE_DATA);
+                        memcpy((void*)sdpiton->ioptr, sdpiton->data_ptr, sdpiton->data_count*512);
+                        wmb();
+			sdpiton->fsm_task = _piton_sd_TASK_WRITE;
+                        /* SD sector address */
+                        sdpiton->baseaddr[ _piton_sd_ADDR_SD ] = sdpiton->data_pos;
+                        /* always start at beginning of DMA buffer */
+                        sdpiton->baseaddr[ _piton_sd_ADDR_DMA ] = 0;
+                        /* set sector count */
+                        sdpiton->baseaddr[ _piton_sd_BLKCNT ] = sdpiton->data_count;
+			sdpiton->baseaddr[ _piton_sd_CTRL ] = _piton_sd_CTRL_IRQ_EN|_piton_sd_CTRL_REQ_WRITE|_piton_sd_CTRL_REQ_VALID;
+                        sdpiton->baseaddr[ _piton_sd_LED ] = sdpiton->data_pos;
+                        wmb();
+			sdpiton->baseaddr[ _piton_sd_CTRL ] = _piton_sd_CTRL_IRQ_EN|_piton_sd_CTRL_REQ_WRITE;
+                        wmb();
 		} else {
 			/* Kick off read request */
 			printk("read data\n");
-			ace->fsm_task = _piton_sd_TASK_READ;
-			pitonsd_out(ace, _piton_sd_SECCNTCMD,
-				count | _piton_sd_SECCNTCMD_READ_DATA);
+                        memset((void*)sdpiton->ioptr, 0xAA, sdpiton->data_count*512);
+                        wmb();
+			sdpiton->fsm_task = _piton_sd_TASK_READ;
+                        /* SD sector address */
+                        sdpiton->baseaddr[ _piton_sd_ADDR_SD ] = sdpiton->data_pos;
+                        /* always start at beginning of DMA buffer */
+                        sdpiton->baseaddr[ _piton_sd_ADDR_DMA ] = 0;
+                        /* set sector count */
+                        sdpiton->baseaddr[ _piton_sd_BLKCNT ] = sdpiton->data_count;
+			sdpiton->baseaddr[ _piton_sd_CTRL ] = _piton_sd_CTRL_REQ_VALID;
+                        sdpiton->baseaddr[ _piton_sd_LED ] = sdpiton->data_pos;
+                        wmb();
+                        sdpiton->baseaddr[ _piton_sd_CTRL ] = _piton_sd_CTRL_IRQ_EN;
+                        wmb();
 		}
-
-		/* As per datasheet, put config controller in reset */
-		val = pitonsd_in(ace, _piton_sd_CTRL);
-		pitonsd_out(ace, _piton_sd_CTRL, val | _piton_sd_CTRL_CFGRESET);
 
 		/* Move to the transfer state.  The systemace will raise
 		 * an interrupt once there is something to do
 		 */
-		ace->fsm_state = _piton_sd_FSM_STATE_REQ_TRANSFER;
-		if (ace->fsm_task == _piton_sd_TASK_READ)
-			pitonsd_fsm_yieldirq(ace);	/* wait for data ready */
+		sdpiton->fsm_state = _piton_sd_FSM_STATE_REQ_TRANSFER;
+		if (sdpiton->fsm_task == _piton_sd_TASK_READ)
+			pitonsd_fsm_yieldirq(sdpiton);	/* wait for data ready */
 		break;
 
 	case _piton_sd_FSM_STATE_REQ_TRANSFER:
-		/* Check that the sysace is ready to receive data */
-		status = pitonsd_in(ace, _piton_sd_STATUS);
-		if (status & _piton_sd_STATUS_CFBSY) {
-			dev_dbg(ace->dev,
-				"CFBSY set; t=%i iter=%i c=%i dc=%i irq=%i\n",
-				ace->fsm_task, ace->fsm_iter_num,
-				blk_rq_cur_sectors(ace->req) * 16,
-				ace->data_count, ace->in_irq);
-			pitonsd_fsm_yield(ace);	/* need to poll CFBSY bit */
-			break;
-		}
-		if (!(status & _piton_sd_STATUS_DATABUFRDY)) {
-			dev_dbg(ace->dev,
-				"DATABUF not set; t=%i iter=%i c=%i dc=%i irq=%i\n",
-				ace->fsm_task, ace->fsm_iter_num,
-				blk_rq_cur_sectors(ace->req) * 16,
-				ace->data_count, ace->in_irq);
-			pitonsd_fsm_yieldirq(ace);
-			break;
-		}
 
-		/* Transfer the next buffer */
-		if (ace->fsm_task == _piton_sd_TASK_WRITE)
-                  pitonsd_out(ace, ace->data_count--, 0);
-		else
-                  pitonsd_in(ace, ace->data_count--);
+                /* Transfer the next buffer */
+                if (sdpiton->fsm_task == _piton_sd_TASK_READ)
+                  {
+                    u64 dma_nxt = sdpiton->baseaddr[_piton_sd_ADDR_DMA_F];
+                    printk("Reading buffer from 0x%llx to 0x%llx (DMA=%llx)\n",
+                           (u64) sdpiton->ioptr, (u64) sdpiton->data_ptr, (u64) dma_nxt);
 
-		/* If there are still buffers to be transfers; jump out here */
-		if (ace->data_count != 0) {
-			pitonsd_fsm_yieldirq(ace);
+#ifdef DEBUG
+                    sdpiton_sector_dump(sdpiton, 1024);
+#endif                    
+                    memcpy(sdpiton->data_ptr, (void*)sdpiton->ioptr, sdpiton->data_count*512);
+                  }
+                
+                /* bio finished; is there another one? */
+		if (__blk_end_request_cur(sdpiton->req, BLK_STS_OK)) {
+			printk("next block; h=%u c=%u\n",
+			       blk_rq_sectors(sdpiton->req),
+			       blk_rq_cur_sectors(sdpiton->req));
+
+			sdpiton->fsm_state = _piton_sd_FSM_STATE_REQ_NEXT;
 			break;
 		}
 
-		/* bio finished; is there another one? */
-		if (__blk_end_request_cur(ace->req, BLK_STS_OK)) {
-			/* printk("next block; h=%u c=%u\n",
-			 *      blk_rq_sectors(ace->req),
-			 *      blk_rq_cur_sectors(ace->req));
-			 */
-			ace->data_ptr = bio_data(ace->req->bio);
-			ace->data_count = blk_rq_cur_sectors(ace->req) * 16;
-			pitonsd_fsm_yieldirq(ace);
-			break;
-		}
-
-		ace->fsm_state = _piton_sd_FSM_STATE_REQ_COMPLETE;
+		sdpiton->fsm_state = _piton_sd_FSM_STATE_REQ_COMPLETE;
 		break;
 
 	case _piton_sd_FSM_STATE_REQ_COMPLETE:
-		ace->req = NULL;
+		sdpiton->req = NULL;
 
 		/* Finished request; go to idle state */
-		ace->fsm_state = _piton_sd_FSM_STATE_IDLE;
+		sdpiton->fsm_state = _piton_sd_FSM_STATE_IDLE;
 		break;
 
 	default:
-		ace->fsm_state = _piton_sd_FSM_STATE_IDLE;
+		sdpiton->fsm_state = _piton_sd_FSM_STATE_IDLE;
 		break;
 	}
 }
 
 static void pitonsd_fsm_tasklet(unsigned long data)
 {
-	struct pitonsd_device *ace = (void *)data;
+	struct pitonsd_device *sdpiton = (void *)data;
 	unsigned long flags;
 
-	spin_lock_irqsave(&ace->lock, flags);
+	spin_lock_irqsave(&sdpiton->lock, flags);
 
 	/* Loop over state machine until told to stop */
-	ace->fsm_continue_flag = 1;
-	while (ace->fsm_continue_flag)
-		pitonsd_fsm_dostate(ace);
+	sdpiton->fsm_continue_flag = 1;
+	while (sdpiton->fsm_continue_flag)
+          {
+            printk("fsm_state=%i\n", sdpiton->fsm_state);
+            pitonsd_fsm_dostate(sdpiton);
+          }
 
-	spin_unlock_irqrestore(&ace->lock, flags);
+        printk("fsm_continue=%i\n", sdpiton->fsm_continue_flag);
+	spin_unlock_irqrestore(&sdpiton->lock, flags);
 }
 
 static void pitonsd_stall_timer(struct timer_list *t)
 {
-	struct pitonsd_device *ace = from_timer(ace, t, stall_timer);
+	struct pitonsd_device *sdpiton = from_timer(sdpiton, t, stall_timer);
 	unsigned long flags;
 
-	dev_warn(ace->dev,
+	dev_warn(sdpiton->dev,
 		 "kicking stalled fsm; state=%i task=%i iter=%i dc=%i\n",
-		 ace->fsm_state, ace->fsm_task, ace->fsm_iter_num,
-		 ace->data_count);
-	spin_lock_irqsave(&ace->lock, flags);
+		 sdpiton->fsm_state, sdpiton->fsm_task, sdpiton->fsm_iter_num,
+		 sdpiton->data_count);
+	spin_lock_irqsave(&sdpiton->lock, flags);
 
 	/* Rearm the stall timer *before* entering FSM (which may then
 	 * delete the timer) */
-	mod_timer(&ace->stall_timer, jiffies + HZ);
+	mod_timer(&sdpiton->stall_timer, jiffies + HZ);
 
 	/* Loop over state machine until told to stop */
-	ace->fsm_continue_flag = 1;
-	while (ace->fsm_continue_flag)
-		pitonsd_fsm_dostate(ace);
+	sdpiton->fsm_continue_flag = 1;
+	while (sdpiton->fsm_continue_flag)
+		pitonsd_fsm_dostate(sdpiton);
 
-	spin_unlock_irqrestore(&ace->lock, flags);
+	spin_unlock_irqrestore(&sdpiton->lock, flags);
 }
 
 /* ---------------------------------------------------------------------
  * Interrupt handling routines
  */
-static int pitonsd_interrupt_checkstate(struct pitonsd_device *ace)
+static int pitonsd_interrupt_checkstate(struct pitonsd_device *sdpiton)
 {
-	u32 sreg = pitonsd_in(ace, _piton_sd_STATUS);
-	u16 creg = pitonsd_in(ace, _piton_sd_CTRL);
-
+        u64 mask = (1 << sdpiton->data_count) - 1;
+	u64 creg = sdpiton->baseaddr[ _piton_sd_ERROR ] & mask;
+        u64 tstate = sdpiton->baseaddr[ _piton_sd_TRAN_STATE ];
+        printk("tran state = %llx\n", tstate);
+        
 	/* Check for error occurrence */
-	if ((sreg & (_piton_sd_STATUS_CFGERROR | _piton_sd_STATUS_CFCERROR)) &&
-	    (creg & _piton_sd_CTRL_ERRORIRQ)) {
-		dev_err(ace->dev, "transfer failure\n");
-		pitonsd_dump_regs(ace);
+	if (mask != creg) {
+		dev_err(sdpiton->dev, "transfer failure\n");
+		pitonsd_dump_regs(sdpiton);
 		return -EIO;
 	}
 
@@ -646,39 +553,36 @@ static int pitonsd_interrupt_checkstate(struct pitonsd_device *ace)
 
 static irqreturn_t pitonsd_interrupt(int irq, void *dev_id)
 {
-	u16 creg;
-	struct pitonsd_device *ace = dev_id;
+	struct pitonsd_device *sdpiton = dev_id;
 
 	/* be safe and get the lock */
-	spin_lock(&ace->lock);
-	ace->in_irq = 1;
+	spin_lock(&sdpiton->lock);
+	sdpiton->in_irq = 1;
 
 	/* clear the interrupt */
-	creg = pitonsd_in(ace, _piton_sd_CTRL);
-	pitonsd_out(ace, _piton_sd_CTRL, creg | _piton_sd_CTRL_RESETIRQ);
-	pitonsd_out(ace, _piton_sd_CTRL, creg);
+	sdpiton->baseaddr[ _piton_sd_CTRL ] = 0;
 
 	/* check for IO failures */
-	if (pitonsd_interrupt_checkstate(ace))
-		ace->data_result = -EIO;
+	if (pitonsd_interrupt_checkstate(sdpiton))
+		sdpiton->data_result = -EIO;
 
-	if (ace->fsm_task == 0) {
-		dev_err(ace->dev,
-			"spurious irq; stat=%.8x ctrl=%.8x cmd=%.4x\n",
-			pitonsd_in(ace, _piton_sd_STATUS), pitonsd_in(ace, _piton_sd_CTRL),
-			pitonsd_in(ace, _piton_sd_SECCNTCMD));
-		dev_err(ace->dev, "fsm_task=%i fsm_state=%i data_count=%i\n",
-			ace->fsm_task, ace->fsm_state, ace->data_count);
+	if (sdpiton->fsm_task == 0) {
+		dev_err(sdpiton->dev,
+			"spurious irq; stat=0x%llx ctrl=0x%llx\n",
+			sdpiton->baseaddr[ _piton_sd_STATUS ], sdpiton->baseaddr[ _piton_sd_CTRL ]);
+
+		dev_err(sdpiton->dev, "fsm_task=%i fsm_state=%i data_count=%i\n",
+			sdpiton->fsm_task, sdpiton->fsm_state, sdpiton->data_count);
 	}
 
 	/* Loop over state machine until told to stop */
-	ace->fsm_continue_flag = 1;
-	while (ace->fsm_continue_flag)
-		pitonsd_fsm_dostate(ace);
+	sdpiton->fsm_continue_flag = 1;
+	while (sdpiton->fsm_continue_flag)
+		pitonsd_fsm_dostate(sdpiton);
 
 	/* done with interrupt; drop the lock */
-	ace->in_irq = 0;
-	spin_unlock(&ace->lock);
+	sdpiton->in_irq = 0;
+	spin_unlock(&sdpiton->lock);
 
 	return IRQ_HANDLED;
 }
@@ -689,57 +593,27 @@ static irqreturn_t pitonsd_interrupt(int irq, void *dev_id)
 static void pitonsd_request(struct request_queue * q)
 {
 	struct request *req;
-	struct pitonsd_device *ace;
+	struct pitonsd_device *sdpiton;
 
 	req = pitonsd_get_next_request(q);
 
 	if (req) {
-		ace = req->rq_disk->private_data;
-		tasklet_schedule(&ace->fsm_tasklet);
+		sdpiton = req->rq_disk->private_data;
+		tasklet_schedule(&sdpiton->fsm_tasklet);
 	}
-}
-
-static unsigned int pitonsd_check_events(struct gendisk *gd, unsigned int clearing)
-{
-	struct pitonsd_device *ace = gd->private_data;
-	printk("pitonsd_check_events(): %i\n", ace->media_change);
-
-	return ace->media_change ? DISK_EVENT_MEDIA_CHANGE : 0;
-}
-
-static int pitonsd_revalidate_disk(struct gendisk *gd)
-{
-	struct pitonsd_device *ace = gd->private_data;
-	unsigned long flags;
-
-	printk("pitonsd_revalidate_disk()\n");
-
-	if (ace->media_change) {
-		printk("requesting cf id and scheduling tasklet\n");
-
-		spin_lock_irqsave(&ace->lock, flags);
-		ace->id_req_count++;
-		spin_unlock_irqrestore(&ace->lock, flags);
-
-		tasklet_schedule(&ace->fsm_tasklet);
-		wait_for_completion(&ace->id_completion);
-	}
-
-	printk("revalidate complete\n");
-	return ace->id_result;
 }
 
 static int pitonsd_open(struct block_device *bdev, fmode_t mode)
 {
-	struct pitonsd_device *ace = bdev->bd_disk->private_data;
+	struct pitonsd_device *sdpiton = bdev->bd_disk->private_data;
 	unsigned long flags;
 
-	printk("pitonsd_open() users=%i\n", ace->users + 1);
+	printk("pitonsd_open() users=%i\n", sdpiton->users + 1);
 
 	mutex_lock(&pitonsd_mutex);
-	spin_lock_irqsave(&ace->lock, flags);
-	ace->users++;
-	spin_unlock_irqrestore(&ace->lock, flags);
+	spin_lock_irqsave(&sdpiton->lock, flags);
+	sdpiton->users++;
+	spin_unlock_irqrestore(&sdpiton->lock, flags);
 
 	check_disk_change(bdev);
 	mutex_unlock(&pitonsd_mutex);
@@ -749,27 +623,22 @@ static int pitonsd_open(struct block_device *bdev, fmode_t mode)
 
 static void pitonsd_release(struct gendisk *disk, fmode_t mode)
 {
-	struct pitonsd_device *ace = disk->private_data;
+	struct pitonsd_device *sdpiton = disk->private_data;
 	unsigned long flags;
-	u16 val;
 
-	printk("pitonsd_release() users=%i\n", ace->users - 1);
+	printk("pitonsd_release() users=%i\n", sdpiton->users - 1);
 
 	mutex_lock(&pitonsd_mutex);
-	spin_lock_irqsave(&ace->lock, flags);
-	ace->users--;
-	if (ace->users == 0) {
-		val = pitonsd_in(ace, _piton_sd_CTRL);
-		pitonsd_out(ace, _piton_sd_CTRL, val & ~_piton_sd_CTRL_LOCKREQ);
-	}
-	spin_unlock_irqrestore(&ace->lock, flags);
+	spin_lock_irqsave(&sdpiton->lock, flags);
+	sdpiton->users--;
+	spin_unlock_irqrestore(&sdpiton->lock, flags);
 	mutex_unlock(&pitonsd_mutex);
 }
 
 static int pitonsd_getgeo(struct block_device *bdev, struct hd_geometry *geo)
 {
-	struct pitonsd_device *ace = bdev->bd_disk->private_data;
-	u16 *cf_id = ace->cf_id;
+	struct pitonsd_device *sdpiton = bdev->bd_disk->private_data;
+	u16 *cf_id = sdpiton->cf_id;
 
 	printk("pitonsd_getgeo()\n");
 
@@ -784,136 +653,138 @@ static const struct block_device_operations pitonsd_fops = {
 	.owner = THIS_MODULE,
 	.open = pitonsd_open,
 	.release = pitonsd_release,
-	.check_events = pitonsd_check_events,
-	.revalidate_disk = pitonsd_revalidate_disk,
 	.getgeo = pitonsd_getgeo,
 };
 
 /* --------------------------------------------------------------------
  * LowRISC_piton_sd device setup/teardown code
  */
-static int pitonsd_setup(struct pitonsd_device *ace)
+static int pitonsd_setup(struct pitonsd_device *sdpiton)
 {
 	u16 version;
-	u16 val;
 	int rc;
+        
+	printk("pitonsd_setup(sdpiton=0x%llx)\n", (u64)sdpiton);
 
-	printk("pitonsd_setup(ace=0x%p)\n", ace);
-	printk("physaddr=0x%llx irq=%i\n",
-		(unsigned long long)ace->physaddr, ace->irq);
-
-	spin_lock_init(&ace->lock);
-	init_completion(&ace->id_completion);
+	spin_lock_init(&sdpiton->lock);
 
 	/*
 	 * Map the device
 	 */
-	ace->baseaddr = ioremap(ace->physaddr, 0x80);
-	if (!ace->baseaddr)
+	sdpiton->baseaddr = ioremap(sdpiton->physaddr, sdpiton->physaddrend - sdpiton->physaddr);
+        sdpiton->ioptr = sdpiton->baseaddr+0x1000;
+	if (!sdpiton->baseaddr)
 		goto err_ioremap;
+
+	printk("physaddr=0x%llx, vstart=%llx, vsiz=%llx, irq=%i\n",
+		(unsigned long long)sdpiton->physaddr,
+		(unsigned long long)sdpiton->baseaddr,
+                (unsigned long long)(sdpiton->physaddrend - sdpiton->physaddr),
+                sdpiton->irq);
+
+#ifdef DEBUG
+        {
+        u8 buff[512];
+        sdpiton_self_test(sdpiton, buff, 0, 1);
+        }
+#endif
 
 	/*
 	 * Initialize the state machine tasklet and stall timer
 	 */
-	tasklet_init(&ace->fsm_tasklet, pitonsd_fsm_tasklet, (unsigned long)ace);
-	timer_setup(&ace->stall_timer, pitonsd_stall_timer, 0);
+	tasklet_init(&sdpiton->fsm_tasklet, pitonsd_fsm_tasklet, (unsigned long)sdpiton);
+	timer_setup(&sdpiton->stall_timer, pitonsd_stall_timer, 0);
 
 	/*
 	 * Initialize the request queue
 	 */
-	ace->queue = blk_init_queue(pitonsd_request, &ace->lock);
-	if (ace->queue == NULL)
+	sdpiton->queue = blk_init_queue(pitonsd_request, &sdpiton->lock);
+	if (sdpiton->queue == NULL)
 		goto err_blk_initq;
-	blk_queue_logical_block_size(ace->queue, 512);
-	blk_queue_bounce_limit(ace->queue, BLK_BOUNCE_HIGH);
+	blk_queue_logical_block_size(sdpiton->queue, 512);
+	blk_queue_bounce_limit(sdpiton->queue, BLK_BOUNCE_HIGH);
 
 	/*
 	 * Allocate and initialize GD structure
 	 */
-	ace->gd = alloc_disk(_piton_sd_NUM_MINORS);
-	if (!ace->gd)
+	sdpiton->gd = alloc_disk(_piton_sd_NUM_MINORS);
+	if (!sdpiton->gd)
 		goto err_alloc_disk;
 
-	ace->gd->major = pitonsd_major;
-	ace->gd->first_minor = ace->id * _piton_sd_NUM_MINORS;
-	ace->gd->fops = &pitonsd_fops;
-	ace->gd->queue = ace->queue;
-	ace->gd->private_data = ace;
-	snprintf(ace->gd->disk_name, 32, "xs%c", ace->id + 'a');
-
+	sdpiton->gd->major = pitonsd_major;
+	sdpiton->gd->first_minor = sdpiton->id * _piton_sd_NUM_MINORS;
+	sdpiton->gd->fops = &pitonsd_fops;
+	sdpiton->gd->queue = sdpiton->queue;
+	sdpiton->gd->private_data = sdpiton;
+	snprintf(sdpiton->gd->disk_name, 32, "rd%c", sdpiton->id + 'a');
+        set_capacity(sdpiton->gd, 1 << 26);
+        /* Tell the block layer that this is not a rotational device */
+        blk_queue_flag_set(QUEUE_FLAG_NONROT, sdpiton->queue);
+        blk_queue_flag_clear(QUEUE_FLAG_ADD_RANDOM, sdpiton->queue);
+        
 	/* Make sure version register is sane */
-	version = pitonsd_in(ace, _piton_sd_VERSION);
+	version = sdpiton->baseaddr[ _piton_sd_VERSION ];
 	if ((version == 0) || (version == 0xFFFF))
 		goto err_read;
 
-	/* Put sysace in a sane state by clearing most control reg bits */
-	pitonsd_out(ace, _piton_sd_CTRL, _piton_sd_CTRL_FORCECFGMODE |
-		_piton_sd_CTRL_DATABUFRDYIRQ | _piton_sd_CTRL_ERRORIRQ);
-
 	/* Now we can hook up the irq handler */
-	if (ace->irq) {
-		rc = request_irq(ace->irq, pitonsd_interrupt, 0, "systemace", ace);
+	if (sdpiton->irq) {
+		rc = request_irq(sdpiton->irq, pitonsd_interrupt, 0, "systemace", sdpiton);
 		if (rc) {
 			/* Failure - fall back to polled mode */
-			dev_err(ace->dev, "request_irq failed\n");
-			ace->irq = 0;
+			dev_err(sdpiton->dev, "request_irq failed\n");
+			sdpiton->irq = 0;
 		}
 	}
 
-	/* Enable interrupts */
-	val = pitonsd_in(ace, _piton_sd_CTRL);
-	val |= _piton_sd_CTRL_DATABUFRDYIRQ | _piton_sd_CTRL_ERRORIRQ;
-	pitonsd_out(ace, _piton_sd_CTRL, val);
-
 	/* Print the identification */
-	dev_info(ace->dev, "LowRISC_piton_sd revision %i.%i.%i\n",
+	dev_info(sdpiton->dev, "LowRISC_piton_sd revision %i.%i.%i\n",
 		 (version >> 12) & 0xf, (version >> 8) & 0x0f, version & 0xff);
-	printk("physaddr 0x%llx, mapped to 0x%p, irq=%i\n",
-		(unsigned long long) ace->physaddr, ace->baseaddr, ace->irq);
+	printk("physaddr 0x%llx, mapped to 0x%llx, irq=%i\n",
+               (u64) sdpiton->physaddr, (u64) sdpiton->baseaddr, sdpiton->irq);
 
-	ace->media_change = 1;
-	pitonsd_revalidate_disk(ace->gd);
+	sdpiton->media_change = 1;
 
 	/* Make the sysace device 'live' */
-	add_disk(ace->gd);
+	add_disk(sdpiton->gd);
 
 	return 0;
 
 err_read:
-	put_disk(ace->gd);
+	put_disk(sdpiton->gd);
 err_alloc_disk:
-	blk_cleanup_queue(ace->queue);
+	blk_cleanup_queue(sdpiton->queue);
 err_blk_initq:
-	iounmap(ace->baseaddr);
+	iounmap(sdpiton->baseaddr);
 err_ioremap:
-	dev_info(ace->dev, "pitonsd: error initializing device at 0x%llx\n",
-		 (unsigned long long) ace->physaddr);
+	dev_info(sdpiton->dev, "pitonsd: error initializing device at 0x%llx\n",
+		 (unsigned long long) sdpiton->physaddr);
 	return -ENOMEM;
 }
 
-static void pitonsd_teardown(struct pitonsd_device *ace)
+static void pitonsd_teardown(struct pitonsd_device *sdpiton)
 {
-	if (ace->gd) {
-		del_gendisk(ace->gd);
-		put_disk(ace->gd);
+	if (sdpiton->gd) {
+		del_gendisk(sdpiton->gd);
+		put_disk(sdpiton->gd);
 	}
 
-	if (ace->queue)
-		blk_cleanup_queue(ace->queue);
+	if (sdpiton->queue)
+		blk_cleanup_queue(sdpiton->queue);
 
-	tasklet_kill(&ace->fsm_tasklet);
+	tasklet_kill(&sdpiton->fsm_tasklet);
 
-	if (ace->irq)
-		free_irq(ace->irq, ace);
+	if (sdpiton->irq)
+		free_irq(sdpiton->irq, sdpiton);
 
-	iounmap(ace->baseaddr);
+	iounmap(sdpiton->baseaddr);
 }
 
-static int pitonsd_alloc(struct device *dev, int id, resource_size_t physaddr, int irq)
+static int pitonsd_alloc(struct device *dev, int id, resource_size_t physaddr, resource_size_t physaddrend, int irq)
 {
-	struct pitonsd_device *ace;
+	struct pitonsd_device *sdpiton;
 	int rc;
-	dev_dbg(dev, "pitonsd_alloc(%p)\n", dev);
+	dev_dbg(dev, "pitonsd_alloc(%llx)\n", (u64)dev);
 
 	if (!physaddr) {
 		rc = -ENODEV;
@@ -921,28 +792,30 @@ static int pitonsd_alloc(struct device *dev, int id, resource_size_t physaddr, i
 	}
 
 	/* Allocate and initialize the ace device structure */
-	ace = kzalloc(sizeof(struct pitonsd_device), GFP_KERNEL);
-	if (!ace) {
+	sdpiton = kzalloc(sizeof(struct pitonsd_device), GFP_KERNEL);
+	if (!sdpiton) {
 		rc = -ENOMEM;
 		goto err_alloc;
 	}
 
-	ace->dev = dev;
-	ace->id = id;
-	ace->physaddr = physaddr;
-	ace->irq = irq;
+	sdpiton->dev = dev;
+	sdpiton->id = id;
+	sdpiton->physaddr = physaddr;
+	sdpiton->physaddrend = physaddrend;
+	sdpiton->irq = irq;
 
 	/* Call the setup code */
-	rc = pitonsd_setup(ace);
+	rc = pitonsd_setup(sdpiton);
 	if (rc)
 		goto err_setup;
 
-	dev_set_drvdata(dev, ace);
+	dev_set_drvdata(dev, sdpiton);
+        printk("pitonsd_alloc returned success\n");
 	return 0;
 
 err_setup:
 	dev_set_drvdata(dev, NULL);
-	kfree(ace);
+	kfree(sdpiton);
 err_alloc:
 err_noreg:
 	dev_err(dev, "could not initialize device, err=%i\n", rc);
@@ -951,13 +824,13 @@ err_noreg:
 
 static void pitonsd_free(struct device *dev)
 {
-	struct pitonsd_device *ace = dev_get_drvdata(dev);
-	dev_dbg(dev, "pitonsd_free(%p)\n", dev);
+	struct pitonsd_device *sdpiton = dev_get_drvdata(dev);
+	dev_dbg(dev, "pitonsd_free(%llx)\n", (u64)dev);
 
-	if (ace) {
-		pitonsd_teardown(ace);
+	if (sdpiton) {
+		pitonsd_teardown(sdpiton);
 		dev_set_drvdata(dev, NULL);
-		kfree(ace);
+		kfree(sdpiton);
 	}
 }
 
@@ -968,11 +841,12 @@ static void pitonsd_free(struct device *dev)
 static int pitonsd_probe(struct platform_device *dev)
 {
 	resource_size_t physaddr = 0;
+	resource_size_t physaddrend = 0;
 	u32 id = dev->id;
 	int irq = 0;
 	int i;
 
-	printk("pitonsd_probe(%p)\n", dev);
+	printk("pitonsd_probe(%llx)\n", (u64)dev);
 
 	/* device id and bus width */
 	if (of_property_read_u32(dev->dev.of_node, "port-number", &id))
@@ -980,13 +854,16 @@ static int pitonsd_probe(struct platform_device *dev)
 
 	for (i = 0; i < dev->num_resources; i++) {
 		if (dev->resource[i].flags & IORESOURCE_MEM)
-			physaddr = dev->resource[i].start;
+                  {
+                    physaddr = dev->resource[i].start;
+                    physaddrend = dev->resource[i].end;
+                  }
 		if (dev->resource[i].flags & IORESOURCE_IRQ)
 			irq = dev->resource[i].start;
 	}
 
 	/* Call the bus-independent setup code */
-	return pitonsd_alloc(&dev->dev, id, physaddr, irq);
+	return pitonsd_alloc(&dev->dev, id, physaddr, physaddrend, irq);
 }
 
 /*
