@@ -301,7 +301,7 @@ static inline void pitonsd_fsm_yield(struct pitonsd_device *sdpiton)
 /* Set flag to exit FSM loop and wait for IRQ to reschedule tasklet */
 static inline void pitonsd_fsm_yieldirq(struct pitonsd_device *sdpiton)
 {
-	printk("pitonsd_fsm_yieldirq()\n");
+	pr_debug("pitonsd_fsm_yieldirq()\n");
 
 	if (!sdpiton->irq)
 		/* No IRQ assigned, so need to poll */
@@ -314,7 +314,7 @@ static struct request *pitonsd_get_next_request(struct request_queue *q)
 {
 	struct request *req;
 
-        printk("pitonsd_get_next_request()\n");
+        pr_debug("pitonsd_get_next_request()\n");
         
 	while ((req = blk_peek_request(q)) != NULL) {
 		if (!blk_rq_is_passthrough(req))
@@ -403,10 +403,10 @@ static void pitonsd_fsm_dostate(struct pitonsd_device *sdpiton)
 		sdpiton->data_count = blk_rq_cur_sectors(sdpiton->req);
                 sdpiton->data_pos = blk_rq_pos(sdpiton->req);
 
-                printk("Sector count = %d\n", sdpiton->data_count);
+                pr_debug("Sector count = %d\n", sdpiton->data_count);
 		if (rq_data_dir(sdpiton->req)) {
 			/* Kick off write request */
-			printk("write data\n");
+			pr_debug("write data\n");
                         memcpy((void*)sdpiton->ioptr, sdpiton->data_ptr, sdpiton->data_count*512);
                         wmb();
 			sdpiton->fsm_task = _piton_sd_TASK_WRITE;
@@ -423,7 +423,7 @@ static void pitonsd_fsm_dostate(struct pitonsd_device *sdpiton)
                         wmb();
 		} else {
 			/* Kick off read request */
-			printk("read data\n");
+			pr_debug("read data\n");
                         memset((void*)sdpiton->ioptr, 0xAA, sdpiton->data_count*512);
                         wmb();
 			sdpiton->fsm_task = _piton_sd_TASK_READ;
@@ -454,7 +454,7 @@ static void pitonsd_fsm_dostate(struct pitonsd_device *sdpiton)
                 if (sdpiton->fsm_task == _piton_sd_TASK_READ)
                   {
                     u64 dma_nxt = sdpiton->baseaddr[_piton_sd_ADDR_DMA_F];
-                    printk("Reading buffer from 0x%llx to 0x%llx (DMA=%llx)\n",
+                    pr_debug("Reading buffer from 0x%llx to 0x%llx (DMA=%llx)\n",
                            (u64) sdpiton->ioptr, (u64) sdpiton->data_ptr, (u64) dma_nxt);
 
 #ifdef DEBUG
@@ -465,7 +465,7 @@ static void pitonsd_fsm_dostate(struct pitonsd_device *sdpiton)
                 
                 /* bio finished; is there another one? */
 		if (__blk_end_request_cur(sdpiton->req, BLK_STS_OK)) {
-			printk("next block; h=%u c=%u\n",
+			pr_debug("next block; h=%u c=%u\n",
 			       blk_rq_sectors(sdpiton->req),
 			       blk_rq_cur_sectors(sdpiton->req));
 
@@ -500,11 +500,11 @@ static void pitonsd_fsm_tasklet(unsigned long data)
 	sdpiton->fsm_continue_flag = 1;
 	while (sdpiton->fsm_continue_flag)
           {
-            printk("fsm_state=%i\n", sdpiton->fsm_state);
+            pr_debug("fsm_state=%i\n", sdpiton->fsm_state);
             pitonsd_fsm_dostate(sdpiton);
           }
 
-        printk("fsm_continue=%i\n", sdpiton->fsm_continue_flag);
+        pr_debug("fsm_continue=%i\n", sdpiton->fsm_continue_flag);
 	spin_unlock_irqrestore(&sdpiton->lock, flags);
 }
 
@@ -539,7 +539,7 @@ static int pitonsd_interrupt_checkstate(struct pitonsd_device *sdpiton)
         u64 mask = (1 << sdpiton->data_count) - 1;
 	u64 creg = sdpiton->baseaddr[ _piton_sd_ERROR ] & mask;
         u64 tstate = sdpiton->baseaddr[ _piton_sd_TRAN_STATE ];
-        printk("tran state = %llx\n", tstate);
+        pr_debug("tran state = %llx\n", tstate);
         
 	/* Check for error occurrence */
 	if (mask != creg) {
@@ -608,7 +608,7 @@ static int pitonsd_open(struct block_device *bdev, fmode_t mode)
 	struct pitonsd_device *sdpiton = bdev->bd_disk->private_data;
 	unsigned long flags;
 
-	printk("pitonsd_open() users=%i\n", sdpiton->users + 1);
+	pr_debug("pitonsd_open() users=%i\n", sdpiton->users + 1);
 
 	mutex_lock(&pitonsd_mutex);
 	spin_lock_irqsave(&sdpiton->lock, flags);
@@ -626,7 +626,7 @@ static void pitonsd_release(struct gendisk *disk, fmode_t mode)
 	struct pitonsd_device *sdpiton = disk->private_data;
 	unsigned long flags;
 
-	printk("pitonsd_release() users=%i\n", sdpiton->users - 1);
+	pr_debug("pitonsd_release() users=%i\n", sdpiton->users - 1);
 
 	mutex_lock(&pitonsd_mutex);
 	spin_lock_irqsave(&sdpiton->lock, flags);
@@ -810,7 +810,7 @@ static int pitonsd_alloc(struct device *dev, int id, resource_size_t physaddr, r
 		goto err_setup;
 
 	dev_set_drvdata(dev, sdpiton);
-        printk("pitonsd_alloc returned success\n");
+        pr_debug("pitonsd_alloc returned success\n");
 	return 0;
 
 err_setup:
