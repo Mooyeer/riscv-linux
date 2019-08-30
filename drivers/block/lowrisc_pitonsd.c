@@ -3,6 +3,7 @@
  *
  * SD-Card block driver based on modified open piton FPGA driver
  * This driver based on xsysace.c (Copyright 2007 Secret Lab Technologies Ltd.)
+ * Original copyright Grant Likely <grant.likely@secretlab.ca>
  * Changes copyright LowRISC CIC
  *
  * This program is free software; you can redistribute it and/or modify it
@@ -71,12 +72,14 @@
  *    interrupt, then the kernel timer will expire and the driver can
  *    continue where it left off.
  *
- * To Do:
- *    - Add FPGA configuration control interface.
- *    - Request major number from lanana
+ *    #define SELF_TEST to compare cached results from first 32MB in polling
+ *    mode with interrupt driven results of normal operation (low confidence checkum)
  */
 
 #undef DEBUG
+//#define DEBUG
+#undef SELF_TEST
+//#define SELF_TEST
 
 #include <linux/module.h>
 #include <linux/ctype.h>
@@ -97,7 +100,7 @@
 #include <linux/of_platform.h>
 #endif
 
-MODULE_AUTHOR("Grant Likely <grant.likely@secretlab.ca>");
+MODULE_AUTHOR("Jonathan Kimmitt <jrrk2@cam.ac.uk>");
 MODULE_DESCRIPTION("LowRISC_piton_sd device driver");
 MODULE_LICENSE("GPL");
 
@@ -127,8 +130,8 @@ MODULE_LICENSE("GPL");
 
 #define _piton_sd_STATUS_REQ          (0x00000001)
 #define _piton_sd_STATUS_WR           (0x00000002)
-#define _piton_sd_STATUS_IRQ_EN       (0x00000004)	/* config controller error */
-#define _piton_sd_STATUS_IRQ          (0x00000008)	/* CF controller error */
+#define _piton_sd_STATUS_IRQ_EN       (0x00000004)
+#define _piton_sd_STATUS_IRQ          (0x00000008)
 #define _piton_sd_STATUS_RDYFORCFCMD  (0x00000010)
 #define _piton_sd_STATUS_CFGDONE      (0x00000020)
 #define _piton_sd_STATUS_SDHC         (0x00000040)
@@ -179,7 +182,14 @@ struct pitonsd_device {
 
 	/* Inserted CF card parameters */
 	u16 cf_id[ATA_ID_WORDS];
+
+#ifdef SELF_TEST
+        /* debug by comparing with polling mode */
+        uint16_t *expected;
+#endif
 };
+
+#define SELF_TEST_LIMIT 65536
 
 static DEFINE_MUTEX(pitonsd_mutex);
 static int pitonsd_major;
@@ -188,34 +198,54 @@ static int pitonsd_major;
  * Debug support functions
  */
 
-#if defined(DEBUG)
-static void pitonsd_dump_mem(void *base, int len)
+#ifdef SELF_TEST
+static u_int csum1(u_char *p, int nr)
 {
-	const char *ptr = base;
-	int i, j;
+	u_int lcrc = 0;
 
-	for (i = 0; i < len; i += 16) {
-		printk(KERN_INFO "%.8x:", i);
-		for (j = 0; j < 16; j++) {
-			if (!(j % 4))
-				printk(" ");
-			printk("%.2x", ptr[i + j]);
-		}
-		printk(" ");
-		for (j = 0; j < 16; j++)
-			printk("%c", isprint(ptr[i + j]) ? ptr[i + j] : '.');
-		printk("\n");
-	}
+	/*
+	 * 16-bit checksum, rotating right before each addition;
+	 * overflow is discarded.
+	 */
+        while (nr--)
+          {
+            if (lcrc & 1)
+              lcrc |= 0x10000;
+            lcrc = ((lcrc >> 1) + *p++) & 0xffff;
+          }
+
+	return lcrc;
 }
-#else
-static inline void pitonsd_dump_mem(void *base, int len)
+
+static void csum2(struct pitonsd_device *sdpiton, void *vp, int pos, int count)
 {
+  u_char *p = vp;
+  while (count-- && pos < SELF_TEST_LIMIT)
+    {
+      u_int sum = csum1(p, 512);
+      if (sum != sdpiton->expected[pos])
+        printk("csum(%d,512) = %u (expected %u)\n", pos, sum, sdpiton->expected[pos]);
+      ++pos;
+      p += 512;
+    }
 }
+
+static void csum3(struct pitonsd_device *sdpiton, void *vp, int pos, int count)
+{
+  u_char *p = vp;
+  while (count-- && pos < SELF_TEST_LIMIT)
+    {
+      u_int sum = csum1(p, 512);
+      sdpiton->expected[pos++] = sum;
+      p += 512;
+    }
+}
+
 #endif
 
 static void pitonsd_dump_regs(struct pitonsd_device *sdpiton)
 {
-	dev_info(sdpiton->dev,
+	printk(
 		 "    sd_f:  0x%llx  dma_f: 0x%llx   status: 0x%llx\n"
 		 "    resp_vec: 0x%llx  init_state: 0x%llx  counter: 0x%llx\n"
 		 "    init_fsm: 0x%llx  tran_state: 0x%llx  tran_fsm: 0x%llx\n",
@@ -253,15 +283,7 @@ static void pitonsd_dump_regs(struct pitonsd_device *sdpiton)
 #define _piton_sd_FSM_STATE_ERROR             10
 #define _piton_sd_FSM_NUM_STATES              11
 
-#ifdef DEBUG
-static void sdpiton_sector_dump(struct pitonsd_device *sdpiton, uint32_t count)
-{
-  int i;
-  for (i = 0; i < count/8; i+=4)
-    printk("%x: %.16llx %.16llx %.16llx %.16llx\n",
-           sdpiton->data_pos*512 + i*8, sdpiton->ioptr[i], sdpiton->ioptr[i+1], sdpiton->ioptr[i+2], sdpiton->ioptr[i+3]);
-}
-
+#ifdef SELF_TEST
 static void sdpiton_self_test(struct pitonsd_device *sdpiton, uint8_t *buff, uint32_t sector, uint32_t count)
 {
   volatile uint64_t *sd_base = sdpiton->baseaddr;
@@ -269,24 +291,24 @@ static void sdpiton_self_test(struct pitonsd_device *sdpiton, uint8_t *buff, uin
   uint64_t vec;
   uint64_t stat = 0xDEADBEEF;
   uint64_t mask = (1 << count) - 1;
-  sd_base[0] = sector;
-  sd_base[1] = 0;
-  sd_base[2] = count;
-  sd_base[3] = 1;
-  sd_base[15] = sector;
-  sd_base[3] = 0;
+  sd_base[_piton_sd_ADDR_SD] = sector;
+  sd_base[_piton_sd_ADDR_DMA] = 0;
+  sd_base[_piton_sd_BLKCNT] = count;
+  sd_base[_piton_sd_CTRL] = _piton_sd_CTRL_REQ_VALID;
+  sd_base[_piton_sd_LED] = sector;
+  sd_base[_piton_sd_CTRL] = 0;
   do
     {
-      stat = sd_base[2];
+      stat = sd_base[_piton_sd_STATUS];
     }
-  while (16 & ~stat);
-  sd_base[15] = 0;
-  vec = sd_base[3] & mask;
+  while (_piton_sd_STATUS_RDYFORCFCMD & ~stat);
+  sd_base[_piton_sd_LED] = 0;
+  vec = sd_base[_piton_sd_ERROR] & mask;
   memcpy(buff, (void*)sd_bram, count*512);
   if (vec!=mask)
     printk("Sector = %d, count = %d, err = %llx\n", sector, count, vec);
   else
-    sdpiton_sector_dump(sdpiton, count*512);
+    csum3(sdpiton, buff, sector, count);
 }
 #endif
 
@@ -403,7 +425,8 @@ static void pitonsd_fsm_dostate(struct pitonsd_device *sdpiton)
 		sdpiton->data_count = blk_rq_cur_sectors(sdpiton->req);
                 sdpiton->data_pos = blk_rq_pos(sdpiton->req);
 
-                pr_debug("Sector count = %d\n", sdpiton->data_count);
+                if (sdpiton->data_count > 8)
+                  printk("Sector count = %d\n", sdpiton->data_count);
 		if (rq_data_dir(sdpiton->req)) {
 			/* Kick off write request */
 			pr_debug("write data\n");
@@ -424,8 +447,6 @@ static void pitonsd_fsm_dostate(struct pitonsd_device *sdpiton)
 		} else {
 			/* Kick off read request */
 			pr_debug("read data\n");
-                        memset((void*)sdpiton->ioptr, 0xAA, sdpiton->data_count*512);
-                        wmb();
 			sdpiton->fsm_task = _piton_sd_TASK_READ;
                         /* SD sector address */
                         sdpiton->baseaddr[ _piton_sd_ADDR_SD ] = sdpiton->data_pos;
@@ -440,7 +461,7 @@ static void pitonsd_fsm_dostate(struct pitonsd_device *sdpiton)
                         wmb();
 		}
 
-		/* Move to the transfer state.  The systemace will raise
+		/* Move to the transfer state.  The pitonsd will raise
 		 * an interrupt once there is something to do
 		 */
 		sdpiton->fsm_state = _piton_sd_FSM_STATE_REQ_TRANSFER;
@@ -453,14 +474,20 @@ static void pitonsd_fsm_dostate(struct pitonsd_device *sdpiton)
                 /* Transfer the next buffer */
                 if (sdpiton->fsm_task == _piton_sd_TASK_READ)
                   {
+                    uint64_t stat;
                     u64 dma_nxt = sdpiton->baseaddr[_piton_sd_ADDR_DMA_F];
+                    do
+                        stat = sdpiton->baseaddr[_piton_sd_STATUS];
+                    while (_piton_sd_STATUS_RDYFORCFCMD & ~stat);
+#ifdef DEBUG
+                    pitonsd_dump_regs(sdpiton);
+#endif                    
                     pr_debug("Reading buffer from 0x%llx to 0x%llx (DMA=%llx)\n",
                            (u64) sdpiton->ioptr, (u64) sdpiton->data_ptr, (u64) dma_nxt);
-
-#ifdef DEBUG
-                    sdpiton_sector_dump(sdpiton, 1024);
-#endif                    
                     memcpy(sdpiton->data_ptr, (void*)sdpiton->ioptr, sdpiton->data_count*512);
+#ifdef SELF_TEST
+                    csum2(sdpiton, sdpiton->data_ptr, sdpiton->data_pos, sdpiton->data_count);
+#endif
                   }
                 
                 /* bio finished; is there another one? */
@@ -682,10 +709,15 @@ static int pitonsd_setup(struct pitonsd_device *sdpiton)
                 (unsigned long long)(sdpiton->physaddrend - sdpiton->physaddr),
                 sdpiton->irq);
 
-#ifdef DEBUG
+#ifdef SELF_TEST
         {
-        u8 buff[512];
-        sdpiton_self_test(sdpiton, buff, 0, 1);
+          int i;
+          u8 *buff = kzalloc(4096, GFP_KERNEL);
+          for (i = 0; i < SELF_TEST_LIMIT; i+=8)
+            {
+              if (i % 1000 == 0) printk("self test iteration %d\n", i);
+              sdpiton_self_test(sdpiton, buff, i, 8);
+            }
         }
 #endif
 
@@ -729,7 +761,7 @@ static int pitonsd_setup(struct pitonsd_device *sdpiton)
 
 	/* Now we can hook up the irq handler */
 	if (sdpiton->irq) {
-		rc = request_irq(sdpiton->irq, pitonsd_interrupt, 0, "systemace", sdpiton);
+		rc = request_irq(sdpiton->irq, pitonsd_interrupt, 0, "pitonsd", sdpiton);
 		if (rc) {
 			/* Failure - fall back to polled mode */
 			dev_err(sdpiton->dev, "request_irq failed\n");
@@ -797,7 +829,13 @@ static int pitonsd_alloc(struct device *dev, int id, resource_size_t physaddr, r
 		rc = -ENOMEM;
 		goto err_alloc;
 	}
-
+#ifdef SELF_TEST
+        sdpiton->expected = kzalloc(SELF_TEST_LIMIT*sizeof(uint16_t), GFP_KERNEL);
+	if (!sdpiton) {
+		rc = -ENOMEM;
+		goto err_alloc;
+	}
+#endif
 	sdpiton->dev = dev;
 	sdpiton->id = id;
 	sdpiton->physaddr = physaddr;
