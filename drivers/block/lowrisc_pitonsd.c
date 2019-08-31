@@ -471,14 +471,12 @@ static void pitonsd_fsm_dostate(struct pitonsd_device *sdpiton)
 
 	case _piton_sd_FSM_STATE_REQ_TRANSFER:
 
+                while (_piton_sd_STATUS_RDYFORCFCMD & ~(sdpiton->baseaddr[_piton_sd_STATUS]));
+
                 /* Transfer the next buffer */
                 if (sdpiton->fsm_task == _piton_sd_TASK_READ)
                   {
-                    uint64_t stat;
                     u64 dma_nxt = sdpiton->baseaddr[_piton_sd_ADDR_DMA_F];
-                    do
-                        stat = sdpiton->baseaddr[_piton_sd_STATUS];
-                    while (_piton_sd_STATUS_RDYFORCFCMD & ~stat);
 #ifdef DEBUG
                     pitonsd_dump_regs(sdpiton);
 #endif                    
