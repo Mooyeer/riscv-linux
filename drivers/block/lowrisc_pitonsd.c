@@ -100,6 +100,8 @@
 #include <linux/of_platform.h>
 #endif
 
+#include "../../block/partitions/check.h"
+
 MODULE_AUTHOR("Jonathan Kimmitt <jrrk2@cam.ac.uk>");
 MODULE_DESCRIPTION("LowRISC_piton_sd device driver");
 MODULE_LICENSE("GPL");
@@ -180,13 +182,7 @@ struct pitonsd_device {
 	struct request_queue *queue;
 	struct gendisk *gd;
 
-	/* Inserted CF card parameters */
-	u16 cf_id[ATA_ID_WORDS];
-
-#ifdef SELF_TEST
-        /* debug by comparing with polling mode */
-        uint16_t *expected;
-#endif
+        struct block_device *bdev;
 };
 
 #define SELF_TEST_LIMIT 65536
@@ -282,35 +278,6 @@ static void pitonsd_dump_regs(struct pitonsd_device *sdpiton)
 #define _piton_sd_FSM_STATE_REQ_COMPLETE       9
 #define _piton_sd_FSM_STATE_ERROR             10
 #define _piton_sd_FSM_NUM_STATES              11
-
-#ifdef SELF_TEST
-static void sdpiton_self_test(struct pitonsd_device *sdpiton, uint8_t *buff, uint32_t sector, uint32_t count)
-{
-  volatile uint64_t *sd_base = sdpiton->baseaddr;
-  volatile uint64_t *sd_bram = sdpiton->baseaddr + 0x1000;
-  uint64_t vec;
-  uint64_t stat = 0xDEADBEEF;
-  uint64_t mask = (1 << count) - 1;
-  sd_base[_piton_sd_ADDR_SD] = sector;
-  sd_base[_piton_sd_ADDR_DMA] = 0;
-  sd_base[_piton_sd_BLKCNT] = count;
-  sd_base[_piton_sd_CTRL] = _piton_sd_CTRL_REQ_VALID;
-  sd_base[_piton_sd_LED] = sector;
-  sd_base[_piton_sd_CTRL] = 0;
-  do
-    {
-      stat = sd_base[_piton_sd_STATUS];
-    }
-  while (_piton_sd_STATUS_RDYFORCFCMD & ~stat);
-  sd_base[_piton_sd_LED] = 0;
-  vec = sd_base[_piton_sd_ERROR] & mask;
-  memcpy(buff, (void*)sd_bram, count*512);
-  if (vec!=mask)
-    printk("Sector = %d, count = %d, err = %llx\n", sector, count, vec);
-  else
-    csum3(sdpiton, buff, sector, count);
-}
-#endif
 
 /* Set flag to exit FSM loop and reschedule tasklet */
 static inline void pitonsd_fsm_yield(struct pitonsd_device *sdpiton)
@@ -547,7 +514,6 @@ static void pitonsd_stall_timer(struct timer_list *t)
 	/* Rearm the stall timer *before* entering FSM (which may then
 	 * delete the timer) */
 	mod_timer(&sdpiton->stall_timer, jiffies + HZ);
-
 	/* Loop over state machine until told to stop */
 	sdpiton->fsm_continue_flag = 1;
 	while (sdpiton->fsm_continue_flag)
@@ -630,8 +596,10 @@ static void pitonsd_request(struct request_queue * q)
 
 static int pitonsd_open(struct block_device *bdev, fmode_t mode)
 {
-	struct pitonsd_device *sdpiton = bdev->bd_disk->private_data;
-	unsigned long flags;
+        struct gendisk *disk = bdev->bd_disk;
+	struct pitonsd_device *sdpiton = disk->private_data;
+        unsigned long flags;
+	sdpiton->bdev = bdev;
 
 	pr_debug("pitonsd_open() users=%i\n", sdpiton->users + 1);
 
@@ -662,16 +630,34 @@ static void pitonsd_release(struct gendisk *disk, fmode_t mode)
 
 static int pitonsd_getgeo(struct block_device *bdev, struct hd_geometry *geo)
 {
-	struct pitonsd_device *sdpiton = bdev->bd_disk->private_data;
-	u16 *cf_id = sdpiton->cf_id;
+	return -ENOTSUPP;
+}
 
-	printk("pitonsd_getgeo()\n");
+static void pitonsd_unlock_native_capacity(struct gendisk *disk)
+{
+        int p;
+	struct pitonsd_device *sdpiton = disk->private_data;
+	size_t inferred_capacity = 1;
+        struct parsed_partitions *mbr = check_partition(sdpiton->bdev->bd_disk, sdpiton->bdev);
+        printk("native partitions %d", mbr->limit);
+        for (p = 1; p < mbr->limit; p++) {
+                sector_t size, from;
 
-	geo->heads	= cf_id[ATA_ID_HEADS];
-	geo->sectors	= cf_id[ATA_ID_SECTORS];
-	geo->cylinders	= cf_id[ATA_ID_CYLS];
+                size = mbr->parts[p].size;
+                if (!size)
+                        continue;
 
-	return 0;
+                from = mbr->parts[p].from;
+                printk("%s: p%d start %llu size %llu",
+                       disk->disk_name, p,
+                       (unsigned long long) from,
+                       (unsigned long long) size);
+                if (from + size > inferred_capacity) {
+                  inferred_capacity = from + size;
+                }
+        }
+        printk("Inferred capacity %lu", inferred_capacity);
+        set_capacity(disk, inferred_capacity); // should come from hardware
 }
 
 static const struct block_device_operations pitonsd_fops = {
@@ -679,6 +665,7 @@ static const struct block_device_operations pitonsd_fops = {
 	.open = pitonsd_open,
 	.release = pitonsd_release,
 	.getgeo = pitonsd_getgeo,
+        .unlock_native_capacity = pitonsd_unlock_native_capacity,
 };
 
 /* --------------------------------------------------------------------
@@ -747,7 +734,7 @@ static int pitonsd_setup(struct pitonsd_device *sdpiton)
 	sdpiton->gd->queue = sdpiton->queue;
 	sdpiton->gd->private_data = sdpiton;
 	snprintf(sdpiton->gd->disk_name, 32, "rd%c", sdpiton->id + 'a');
-        set_capacity(sdpiton->gd, 1 << 26);
+        set_capacity(sdpiton->gd, 255*1023*31); // dummy (255 heads, 1023 cyl, 31 sectors)
         /* Tell the block layer that this is not a rotational device */
         blk_queue_flag_set(QUEUE_FLAG_NONROT, sdpiton->queue);
         blk_queue_flag_clear(QUEUE_FLAG_ADD_RANDOM, sdpiton->queue);

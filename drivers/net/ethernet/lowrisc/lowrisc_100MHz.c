@@ -745,9 +745,11 @@ static int lowrisc_100MHz_probe(struct platform_device *ofdev)
 
 	/* Set the MAC address in the Ether100MHz device */
 	lowrisc_update_address(priv, ndev->dev_addr);
-
+#ifdef CONFIG_LOWRISC_MII_INIT
 	lowrisc_mii_init(ndev);
-
+#else
+        /* skip MMI init */
+#endif
 	/* Finally, register the device */
 	rc = register_netdev(ndev);
 	if (rc) {

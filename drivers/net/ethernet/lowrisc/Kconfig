@@ -23,4 +23,12 @@ config LOWRISC_DIGILENT_100MHZ
 	---help---
 	  This driver supports the 100MHz Ethernet for Nexys4_DDR Digilent boards from Lowrisc.
 
+config NET_VENDOR_LOWRISC_MII_INIT
+	bool "Lowrisc devices media independent initialization"
+	default y
+	depends on RISCV
+	---help---
+	  If you use Debian Installer, it tries and fails to initialise the MII, say N.
+          If you use a regular kernel, this provides access to mii-tool etc., say Y.
+
 endif # NET_VENDOR_LOWRISC
