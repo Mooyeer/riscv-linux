@@ -72,14 +72,10 @@
  *    interrupt, then the kernel timer will expire and the driver can
  *    continue where it left off.
  *
- *    #define SELF_TEST to compare cached results from first 32MB in polling
- *    mode with interrupt driven results of normal operation (low confidence checkum)
  */
 
 #undef DEBUG
 //#define DEBUG
-#undef SELF_TEST
-//#define SELF_TEST
 
 #include <linux/module.h>
 #include <linux/ctype.h>
@@ -185,59 +181,12 @@ struct pitonsd_device {
         struct block_device *bdev;
 };
 
-#define SELF_TEST_LIMIT 65536
-
 static DEFINE_MUTEX(pitonsd_mutex);
 static int pitonsd_major;
 
 /* ---------------------------------------------------------------------
  * Debug support functions
  */
-
-#ifdef SELF_TEST
-static u_int csum1(u_char *p, int nr)
-{
-	u_int lcrc = 0;
-
-	/*
-	 * 16-bit checksum, rotating right before each addition;
-	 * overflow is discarded.
-	 */
-        while (nr--)
-          {
-            if (lcrc & 1)
-              lcrc |= 0x10000;
-            lcrc = ((lcrc >> 1) + *p++) & 0xffff;
-          }
-
-	return lcrc;
-}
-
-static void csum2(struct pitonsd_device *sdpiton, void *vp, int pos, int count)
-{
-  u_char *p = vp;
-  while (count-- && pos < SELF_TEST_LIMIT)
-    {
-      u_int sum = csum1(p, 512);
-      if (sum != sdpiton->expected[pos])
-        printk("csum(%d,512) = %u (expected %u)\n", pos, sum, sdpiton->expected[pos]);
-      ++pos;
-      p += 512;
-    }
-}
-
-static void csum3(struct pitonsd_device *sdpiton, void *vp, int pos, int count)
-{
-  u_char *p = vp;
-  while (count-- && pos < SELF_TEST_LIMIT)
-    {
-      u_int sum = csum1(p, 512);
-      sdpiton->expected[pos++] = sum;
-      p += 512;
-    }
-}
-
-#endif
 
 static void pitonsd_dump_regs(struct pitonsd_device *sdpiton)
 {
@@ -345,7 +294,7 @@ static void pitonsd_fsm_dostate(struct pitonsd_device *sdpiton)
 		if (pitonsd_get_next_request(sdpiton->queue)) {
 			sdpiton->fsm_iter_num++;
 			sdpiton->fsm_state = _piton_sd_FSM_STATE_REQ_LOCK;
-			mod_timer(&sdpiton->stall_timer, jiffies + HZ);
+			mod_timer(&sdpiton->stall_timer, jiffies + HZ*5);
 			if (!timer_pending(&sdpiton->stall_timer))
 				add_timer(&sdpiton->stall_timer);
 			break;
@@ -450,9 +399,6 @@ static void pitonsd_fsm_dostate(struct pitonsd_device *sdpiton)
                     pr_debug("Reading buffer from 0x%llx to 0x%llx (DMA=%llx)\n",
                            (u64) sdpiton->ioptr, (u64) sdpiton->data_ptr, (u64) dma_nxt);
                     memcpy(sdpiton->data_ptr, (void*)sdpiton->ioptr, sdpiton->data_count*512);
-#ifdef SELF_TEST
-                    csum2(sdpiton, sdpiton->data_ptr, sdpiton->data_pos, sdpiton->data_count);
-#endif
                   }
                 
                 /* bio finished; is there another one? */
@@ -513,7 +459,7 @@ static void pitonsd_stall_timer(struct timer_list *t)
 
 	/* Rearm the stall timer *before* entering FSM (which may then
 	 * delete the timer) */
-	mod_timer(&sdpiton->stall_timer, jiffies + HZ);
+	mod_timer(&sdpiton->stall_timer, jiffies + HZ*5);
 	/* Loop over state machine until told to stop */
 	sdpiton->fsm_continue_flag = 1;
 	while (sdpiton->fsm_continue_flag)
@@ -694,18 +640,6 @@ static int pitonsd_setup(struct pitonsd_device *sdpiton)
                 (unsigned long long)(sdpiton->physaddrend - sdpiton->physaddr),
                 sdpiton->irq);
 
-#ifdef SELF_TEST
-        {
-          int i;
-          u8 *buff = kzalloc(4096, GFP_KERNEL);
-          for (i = 0; i < SELF_TEST_LIMIT; i+=8)
-            {
-              if (i % 1000 == 0) printk("self test iteration %d\n", i);
-              sdpiton_self_test(sdpiton, buff, i, 8);
-            }
-        }
-#endif
-
 	/*
 	 * Initialize the state machine tasklet and stall timer
 	 */
@@ -814,13 +748,7 @@ static int pitonsd_alloc(struct device *dev, int id, resource_size_t physaddr, r
 		rc = -ENOMEM;
 		goto err_alloc;
 	}
-#ifdef SELF_TEST
-        sdpiton->expected = kzalloc(SELF_TEST_LIMIT*sizeof(uint16_t), GFP_KERNEL);
-	if (!sdpiton) {
-		rc = -ENOMEM;
-		goto err_alloc;
-	}
-#endif
+
 	sdpiton->dev = dev;
 	sdpiton->id = id;
 	sdpiton->physaddr = physaddr;

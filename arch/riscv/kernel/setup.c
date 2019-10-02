@@ -30,6 +30,7 @@
 #include <linux/of_platform.h>
 #include <linux/sched/task.h>
 #include <linux/swiotlb.h>
+#include <linux/writeback.h>
 
 #include <asm/setup.h>
 #include <asm/sections.h>
@@ -245,5 +246,6 @@ void __init setup_arch(char **cmdline_p)
 #endif
 
 	riscv_fill_hwcap();
+        dirty_writeback_interval = 30 * 100; /* centiseconds */
 }
 
